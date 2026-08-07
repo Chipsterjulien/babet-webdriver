@@ -11,13 +11,24 @@ local worker_driver = require("webdriver_worker")
 local driver_manager = require("driver_manager")
 local version = require("webdriver_version")
 
-assert(version == "1.1.0")
+assert(version == "1.1.1")
 assert(webdriver.VERSION == version)
 assert(worker_driver.VERSION == version)
 assert(driver_manager.VERSION == version)
 assert(driver_manager.user_agent == "babet-webdriver/" .. version)
 
 assert(babet.mkdir(script_dir .. "/tmp"))
+
+local ok_fractional_window_size = pcall(function()
+    webdriver.chromium({
+        attach = true,
+        port = 1,
+        binary = "/bin/true",
+        window_size = { 800.5, 600 },
+    })
+end)
+assert(ok_fractional_window_size == false)
+
 local server = assert(mock.start())
 
 local driver = assert(webdriver.firefox({

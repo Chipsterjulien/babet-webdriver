@@ -325,13 +325,36 @@ local function export_parent_value(value, seen)
     return out
 end
 
-function Session:_receive(expected_id, timeout)
-    local ok, response = self.results:recv(timeout)
-    if not ok then
-        return nil, "webdriver_worker: réception: " .. tostring(response)
+local function receive_matching_response(session, expected_id, timeout)
+    local deadline = babet.monotonic() + timeout
+    while true do
+        local remaining = deadline - babet.monotonic()
+        if remaining <= 0 then
+            return nil, "timeout"
+        end
+        local ok, response = session.results:recv(remaining)
+        if not ok then
+            return nil, response
+        end
+        if type(response) ~= "table" or type(response.id) ~= "number" then
+            return nil, "réponse inattendue ou désynchronisée"
+        end
+        if response.id == expected_id then
+            return response
+        end
+        if response.id > expected_id then
+            return nil, "réponse future inattendue ou désynchronisée"
+        end
+        -- Une commande précédente peut avoir expiré côté parent alors qu'elle
+        -- continuait encore dans le worker. Sa réponse tardive est devenue
+        -- obsolète : on la draine sans réinitialiser la deadline de l'appel.
     end
-    if type(response) ~= "table" or response.id ~= expected_id then
-        return nil, "webdriver_worker: réponse inattendue ou désynchronisée"
+end
+
+function Session:_receive(expected_id, timeout)
+    local response, receive_err = receive_matching_response(self, expected_id, timeout)
+    if not response then
+        return nil, "webdriver_worker: réception: " .. tostring(receive_err)
     end
     if not response.ok then
         return nil, "webdriver_worker: " .. tostring(response.error), response.code
@@ -398,13 +421,13 @@ function Session:stop(timeout)
         self.closed = true
         return nil, "webdriver_worker: arrêt: " .. tostring(send_err)
     end
-    local received, response = self.results:recv(timeout)
-    if not received or type(response) ~= "table" or response.id ~= id then
+    local response, receive_err = receive_matching_response(self, id, timeout)
+    if not response then
         self.job:cancel()
         self.commands:close()
         self.results:close()
         self.closed = true
-        return nil, "webdriver_worker: arrêt sans confirmation: " .. tostring(response)
+        return nil, "webdriver_worker: arrêt sans confirmation: " .. tostring(receive_err)
     end
     self.commands:close()
     local joined, join_value = self.job:join(timeout)

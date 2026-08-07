@@ -683,12 +683,10 @@ local function build_capabilities(opts, descriptor, browser_binary, user_data_di
         if #dimensions ~= 2 then
             error("webdriver: window_size doit être exactement { largeur, hauteur }", 3)
         end
-        local raw_width = finite_number("webdriver: largeur de window_size", dimensions[1])
-        local raw_height = finite_number("webdriver: hauteur de window_size", dimensions[2])
-        local width = math.floor(raw_width)
-        local height = math.floor(raw_height)
+        local width = finite_integer("webdriver: largeur de window_size", dimensions[1])
+        local height = finite_integer("webdriver: hauteur de window_size", dimensions[2])
         if width <= 0 or height <= 0 then
-            error("webdriver: les dimensions de window_size doivent être positives", 3)
+            error("webdriver: les dimensions de window_size doivent être des entiers positifs", 3)
         end
         if descriptor.browser_name == "firefox" then
             arguments[#arguments + 1] = "--width=" .. width
@@ -930,12 +928,16 @@ function M.start(options)
         capabilities = session_value.capabilities or {}
     end
     if type(session_id) ~= "string" or session_id == "" then
+        local details = "réponse de création de session sans sessionId"
         if process then
-            process:terminate(terminate_grace)
-            process:close()
+            local _, terminate_err = process:terminate(terminate_grace)
+            local _, close_err = process:close()
+            if terminate_err then details = details .. "; arrêt du driver: " .. tostring(terminate_err) end
+            if close_err then details = details .. "; fermeture du driver: " .. tostring(close_err) end
         end
-        remove_tree_best_effort(temporary_profile_dir)
-        return fail("réponse de création de session sans sessionId")
+        local _, cleanup_err = remove_tree_best_effort(temporary_profile_dir)
+        if cleanup_err then details = details .. "; " .. cleanup_err end
+        return fail(details)
     end
 
     local driver = setmetatable({

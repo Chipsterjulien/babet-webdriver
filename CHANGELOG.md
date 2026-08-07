@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.1.1 — durcissement du transport worker et des validations
+
+- rend le proxy worker récupérable après un `command_timeout` : les réponses tardives d'appels déjà expirés sont drainées sans désynchroniser l'appel suivant ;
+- applique une deadline monotone unique pendant ce drainage afin qu'une suite de réponses obsolètes ne puisse pas prolonger indéfiniment l'attente ;
+- utilise le même mécanisme robuste lors de `Session:stop()`, qui n'est plus perturbé par une ancienne réponse encore présente dans le channel ;
+- refuse désormais les dimensions fractionnaires dans `window_size` au lieu de les tronquer silencieusement ;
+- conserve les diagnostics d'arrêt du driver et de nettoyage du profil lorsqu'une réponse de création de session est mal formée ;
+- ajoute des tests de rétablissement après timeout worker et de validation stricte de `window_size`.
+
 ## 1.1.0 — WebDriver Classic complet et socle prêt pour BiDi
 
 ### Corrections de validation

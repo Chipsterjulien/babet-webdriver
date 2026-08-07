@@ -100,5 +100,31 @@ pdf:close()
 assert(session:stop())
 local joined, result = server.job:join(5)
 assert(joined, result)
+
+local timeout_server = assert(mock.start())
+local timeout_session = assert(worker_driver.start({
+    browser = "firefox",
+    attach = true,
+    port = timeout_server.port,
+    request_timeout = 5,
+    status_timeout = 1,
+    start_timeout = 5,
+    command_timeout = 0.05,
+    worker_start_timeout = 10,
+    stop_timeout = 1,
+}))
+local timed_value, timed_err = timeout_session:wait("#missing", {
+    timeout = 0.08,
+    interval = 0.02,
+})
+assert(timed_value == nil and tostring(timed_err):find("réception: timeout", 1, true))
+-- L'appel continue dans le worker. Après sa réponse tardive, le prochain appel
+-- doit drainer cette réponse obsolète et retrouver sa propre réponse.
+babet.sleep(0.08, "s")
+assert(timeout_session:title() == "Mock title")
+assert(timeout_session:stop())
+local timeout_joined, timeout_result = timeout_server.job:join(5)
+assert(timeout_joined, timeout_result)
+
 assert(babet.rmdirAll(script_dir .. "/tmp"))
 print("worker_test: OK")

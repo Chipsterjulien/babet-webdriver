@@ -1,5 +1,7 @@
 # babet-webdriver
 
+Dépôt officiel : https://github.com/Chipsterjulien/babet-webdriver
+
 Client **WebDriver W3C** en Lua pour **Babet 2.9.0 ou supérieur**. Il pilote
 Firefox, Chrome et Chromium avec une API proche de Selenium, sans module Lua
 externe et sans lancer de shell pour gérer les drivers. Babet est disponible sur
@@ -421,8 +423,11 @@ channels transportent uniquement des commandes et des résultats sérialisables.
 Les éléments renvoyés deviennent des proxies utilisables par le parent.
 
 Une session proxy traite une commande à la fois. Pour du parallélisme, crée
-plusieurs sessions workers indépendantes. Le test d'intégration réel correspondant
-se lance avec `./run_worker_smoke.sh firefox` ou `chromium`.
+plusieurs sessions workers indépendantes. Si `command_timeout` expire, la commande
+peut encore terminer dans le worker ; sa réponse tardive est désormais drainée
+automatiquement et ne désynchronise plus l'appel suivant. Le timeout du prochain
+appel reste borné par sa propre deadline monotone. Le test d'intégration réel
+correspondant se lance avec `./run_worker_smoke.sh firefox` ou `chromium`.
 
 ## Contrat d'erreur
 

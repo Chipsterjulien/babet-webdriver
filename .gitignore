@@ -1,2 +1,8 @@
 # Binaire local Babet
 /bin/babet
+tmp/
+ttmp/
+# Manifestes générés pour les archives de livraison
+/MODIFIED_FILES_*.txt
+/babet-webdriver-tests.txt
+/.babet-webdriver-tests.txt.lock
