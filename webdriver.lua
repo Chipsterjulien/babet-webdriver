@@ -23,10 +23,13 @@ local http = assert(babet.http, "webdriver: module babet.http indisponible")
 local json = assert(babet.json, "webdriver: module babet.json indisponible")
 local base64 = assert(babet.base64, "webdriver: module babet.base64 indisponible")
 
+local VERSION = require("webdriver_version")
 local ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
+local SHADOW_KEY = "shadow-6066-11e4-a52e-4f735466cecf"
 local M = {
-    VERSION = "1.0.2",
+    VERSION = VERSION,
     ELEMENT_KEY = ELEMENT_KEY,
+    SHADOW_KEY = SHADOW_KEY,
 }
 
 local WebDriver = {}
@@ -34,6 +37,9 @@ WebDriver.__index = WebDriver
 
 local Element = {}
 Element.__index = Element
+
+local ShadowRoot = {}
+ShadowRoot.__index = ShadowRoot
 
 local Actions = {}
 Actions.__index = Actions
@@ -114,6 +120,16 @@ local function finite_number(name, value, default)
         error(name .. " doit être un nombre fini", 3)
     end
     return value
+end
+
+local function finite_integer(name, value, default)
+    value = finite_number(name, value, default)
+    if value == nil then return nil end
+    local integer = math.tointeger(value)
+    if integer == nil then
+        error(name .. " doit être un entier fini", 3)
+    end
+    return integer
 end
 
 local function copy_table(source)
@@ -207,6 +223,13 @@ local function new_element(driver, id)
     return setmetatable({ driver = driver, id = id }, Element)
 end
 
+local function new_shadow_root(driver, id)
+    if type(id) ~= "string" or id == "" then
+        return nil
+    end
+    return setmetatable({ driver = driver, id = id }, ShadowRoot)
+end
+
 local function wrap_element(driver, value)
     if type(value) ~= "table" then
         return nil
@@ -214,12 +237,25 @@ local function wrap_element(driver, value)
     return new_element(driver, value[ELEMENT_KEY])
 end
 
+local function wrap_shadow_root(driver, value)
+    if type(value) ~= "table" then
+        return nil
+    end
+    return new_shadow_root(driver, value[SHADOW_KEY])
+end
+
 local function wrap_result(driver, value, seen)
+    if value == json.null then
+        return json.null
+    end
     if type(value) ~= "table" then
         return value
     end
     if value[ELEMENT_KEY] then
         return wrap_element(driver, value)
+    end
+    if value[SHADOW_KEY] then
+        return wrap_shadow_root(driver, value)
     end
     seen = seen or {}
     if seen[value] then
@@ -234,11 +270,17 @@ local function wrap_result(driver, value, seen)
 end
 
 local function encode_argument(value, seen)
+    if value == json.null then
+        return json.null
+    end
     if type(value) ~= "table" then
         return value
     end
     if getmetatable(value) == Element then
         return { [ELEMENT_KEY] = value.id }
+    end
+    if getmetatable(value) == ShadowRoot then
+        return { [SHADOW_KEY] = value.id }
     end
     seen = seen or {}
     if seen[value] then
@@ -327,23 +369,23 @@ function WebDriver:_request(method, url, body, timeout)
     )
 end
 
-local function screenshot_to_file(encoded, path, max_output, permissions, durable)
+local function base64_to_file(encoded, path, max_output, permissions, durable, label)
     if type(encoded) ~= "string" then
-        return fail("capture Base64 invalide")
+        return fail(label .. " Base64 invalide")
     end
     if type(path) ~= "string" or path == "" then
-        error("webdriver: le chemin de capture doit être une chaîne non vide", 3)
+        error("webdriver: le chemin " .. label .. " doit être une chaîne non vide", 3)
     end
     local binary, decode_err = base64.decode(encoded, { max_output = max_output })
     if not binary then
-        return fail("décodage Base64: " .. tostring(decode_err))
+        return fail("décodage Base64 " .. label .. ": " .. tostring(decode_err))
     end
     local parent = babet.getPath(path)
     if parent == "" or parent == "." then parent = nil end
     if parent then
         local created, mkdir_err = babet.mkdir(parent)
         if not created then
-            return fail("création du dossier de capture: " .. tostring(mkdir_err))
+            return fail("création du dossier " .. label .. ": " .. tostring(mkdir_err))
         end
     end
     local ok, write_err = babet.writeFileAtomic(path, binary, {
@@ -352,9 +394,13 @@ local function screenshot_to_file(encoded, path, max_output, permissions, durabl
         durable = durable,
     })
     if not ok then
-        return fail("écriture de la capture: " .. tostring(write_err))
+        return fail("écriture " .. label .. ": " .. tostring(write_err))
     end
     return path
+end
+
+local function screenshot_to_file(encoded, path, max_output, permissions, durable)
+    return base64_to_file(encoded, path, max_output, permissions, durable, "de capture")
 end
 
 local DRIVERS = {
@@ -407,6 +453,9 @@ local START_OPTIONS = {
     screenshot_max_size = true,
     screenshot_permissions = true,
     screenshot_durable = true,
+    print_max_size = true,
+    print_permissions = true,
+    print_durable = true,
     log_path = true,
     log_dir = true,
     log_append = true,
@@ -686,6 +735,7 @@ function M.start(options)
     optional_boolean("webdriver: attach", opts.attach)
     optional_boolean("webdriver: log_append", opts.log_append)
     optional_boolean("webdriver: screenshot_durable", opts.screenshot_durable)
+    optional_boolean("webdriver: print_durable", opts.print_durable)
     optional_nonempty_string("webdriver: driver_path", opts.driver_path)
     optional_nonempty_string("webdriver: platform", opts.platform)
     optional_nonempty_string("webdriver: cache", opts.cache)
@@ -716,6 +766,16 @@ function M.start(options)
         opts.screenshot_permissions,
         tonumber("644", 8)
     )
+    local print_max_size = positive_integer(
+        "webdriver: print_max_size",
+        opts.print_max_size,
+        64 * 1024 * 1024
+    )
+    local print_permissions = permissions_value(
+        "webdriver: print_permissions",
+        opts.print_permissions,
+        tonumber("644", 8)
+    )
     local log_permissions = permissions_value(
         "webdriver: log_permissions",
         opts.log_permissions,
@@ -724,6 +784,7 @@ function M.start(options)
     local terminate_grace = finite_positive("webdriver: terminate_grace", opts.terminate_grace, 2)
     local log_append = opts.log_append ~= false
     local screenshot_durable = opts.screenshot_durable ~= false
+    local print_durable = opts.print_durable ~= false
 
     local browser_binary, browser_binary_err = resolve_browser_binary(opts, browser)
     if browser_binary_err then return nil, browser_binary_err end
@@ -895,6 +956,9 @@ function M.start(options)
         screenshot_max_size = screenshot_max_size,
         screenshot_permissions = screenshot_permissions,
         screenshot_durable = screenshot_durable,
+        print_max_size = print_max_size,
+        print_permissions = print_permissions,
+        print_durable = print_durable,
         terminate_grace = terminate_grace,
         closed = false,
     }, WebDriver)
@@ -931,6 +995,25 @@ function M.element(driver, id)
         error("webdriver.element: id doit être une chaîne non vide", 2)
     end
     return new_element(driver, id)
+end
+
+function M.is_shadow_root(value)
+    return type(value) == "table" and getmetatable(value) == ShadowRoot
+end
+
+function M.shadow_root_id(value)
+    if not M.is_shadow_root(value) then return nil end
+    return value.id
+end
+
+function M.shadow_root(driver, id)
+    if getmetatable(driver) ~= WebDriver then
+        error("webdriver.shadow_root: driver invalide", 2)
+    end
+    if type(id) ~= "string" or id == "" then
+        error("webdriver.shadow_root: id doit être une chaîne non vide", 2)
+    end
+    return new_shadow_root(driver, id)
 end
 
 function WebDriver:capabilities()
@@ -1017,6 +1100,14 @@ function WebDriver:find_all(selector, opts)
         out[#out + 1] = element
     end
     return out
+end
+
+function WebDriver:active_element()
+    local response, err, code = self:_request("GET", self.session .. "/element/active")
+    if response == nil then return nil, err, code end
+    local element = wrap_element(self, response)
+    if not element then return fail("réponse d'élément actif invalide") end
+    return element
 end
 
 function WebDriver:css(selector) return self:find(selector, { by = "css" }) end
@@ -1130,9 +1221,9 @@ function WebDriver:wait(selector, options)
     end
 end
 
-function WebDriver:js(script, ...)
+local function execute_script(driver, endpoint, label, script, ...)
     if type(script) ~= "string" then
-        error("webdriver.js: script doit être une chaîne", 2)
+        error("webdriver." .. label .. ": script doit être une chaîne", 3)
     end
     local count = select("#", ...)
     local arguments = {}
@@ -1140,12 +1231,20 @@ function WebDriver:js(script, ...)
         local argument = select(index, ...)
         arguments[index] = argument == nil and json.null or encode_argument(argument)
     end
-    local value, err = self:_request("POST", self.session .. "/execute/sync", {
+    local value, err, code = driver:_request("POST", driver.session .. endpoint, {
         script = script,
         args = as_json_array(arguments),
     })
-    if err then return nil, err end
-    return wrap_result(self, value)
+    if err then return nil, err, code end
+    return wrap_result(driver, value)
+end
+
+function WebDriver:js(script, ...)
+    return execute_script(self, "/execute/sync", "js", script, ...)
+end
+
+function WebDriver:js_async(script, ...)
+    return execute_script(self, "/execute/async", "js_async", script, ...)
 end
 
 function WebDriver:screenshot(path)
@@ -1158,6 +1257,109 @@ function WebDriver:screenshot(path)
         self.screenshot_max_size,
         self.screenshot_permissions,
         self.screenshot_durable
+    )
+end
+
+local PRINT_OPTIONS = {
+    orientation = true,
+    scale = true,
+    background = true,
+    page = true,
+    margin = true,
+    shrink_to_fit = true,
+    page_ranges = true,
+}
+
+local function finite_range(name, value, minimum, maximum)
+    if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge
+        or value < minimum or (maximum ~= nil and value > maximum) then
+        error(("%s doit être un nombre fini compris entre %s et %s")
+            :format(name, tostring(minimum), maximum and tostring(maximum) or "+inf"), 3)
+    end
+    return value
+end
+
+local function print_parameters(options)
+    local opts = strict_table("webdriver.print(opts)", options, PRINT_OPTIONS)
+    local body = {}
+    if opts.orientation ~= nil then
+        if opts.orientation ~= "portrait" and opts.orientation ~= "landscape" then
+            error("webdriver.print: orientation doit valoir 'portrait' ou 'landscape'", 3)
+        end
+        body.orientation = opts.orientation
+    end
+    if opts.scale ~= nil then
+        body.scale = finite_range("webdriver.print: scale", opts.scale, 0.1, 2)
+    end
+    if opts.background ~= nil then
+        if type(opts.background) ~= "boolean" then
+            error("webdriver.print: background doit être un booléen", 3)
+        end
+        body.background = opts.background
+    end
+    if opts.shrink_to_fit ~= nil then
+        if type(opts.shrink_to_fit) ~= "boolean" then
+            error("webdriver.print: shrink_to_fit doit être un booléen", 3)
+        end
+        body.shrinkToFit = opts.shrink_to_fit
+    end
+    if opts.page ~= nil then
+        local page = strict_table("webdriver.print: page", opts.page, { width = true, height = true })
+        local encoded = {}
+        if page.width ~= nil then
+            encoded.width = finite_range("webdriver.print: page.width", page.width, 2.54 / 72)
+        end
+        if page.height ~= nil then
+            encoded.height = finite_range("webdriver.print: page.height", page.height, 2.54 / 72)
+        end
+        body.page = encoded
+    end
+    if opts.margin ~= nil then
+        local margin = strict_table("webdriver.print: margin", opts.margin, {
+            top = true, bottom = true, left = true, right = true,
+        })
+        local encoded = {}
+        for _, name in ipairs({ "top", "bottom", "left", "right" }) do
+            if margin[name] ~= nil then
+                encoded[name] = finite_range("webdriver.print: margin." .. name, margin[name], 0)
+            end
+        end
+        body.margin = encoded
+    end
+    if opts.page_ranges ~= nil then
+        local ranges = dense_array(opts.page_ranges, "webdriver.print: page_ranges")
+        local encoded = {}
+        for index, value in ipairs(ranges) do
+            local value_type = type(value)
+            if value_type == "number" then
+                if math.type(value) ~= "integer" or value < 0 then
+                    error("webdriver.print: page_ranges contient un numéro de page invalide", 3)
+                end
+            elseif value_type ~= "string" then
+                error("webdriver.print: page_ranges doit contenir des chaînes ou entiers", 3)
+            end
+            encoded[index] = value
+        end
+        body.pageRanges = as_json_array(encoded)
+    end
+    return body
+end
+
+function WebDriver:print(options, path)
+    if type(options) == "string" and path == nil then
+        path, options = options, nil
+    end
+    local body = print_parameters(options)
+    local encoded, err = self:_request("POST", self.session .. "/print", body)
+    if encoded == nil then return nil, err end
+    if path == nil then return encoded end
+    return base64_to_file(
+        encoded,
+        path,
+        self.print_max_size,
+        self.print_permissions,
+        self.print_durable,
+        "du PDF"
     )
 end
 
@@ -1181,10 +1383,21 @@ function WebDriver:switch_last()
     return self:switch(handle)
 end
 
+function WebDriver:new_window(kind)
+    if kind ~= nil and kind ~= "tab" and kind ~= "window" then
+        error("webdriver.new_window: type attendu = 'tab', 'window' ou nil", 2)
+    end
+    local body = kind and { type = kind } or {}
+    local value, err, code = self:_request("POST", self.session .. "/window/new", body)
+    if value == nil then return nil, err, code end
+    if type(value) ~= "table" or type(value.handle) ~= "string" or value.handle == "" then
+        return fail("réponse de création de fenêtre invalide")
+    end
+    return value.handle, value.type
+end
+
 function WebDriver:new_tab()
-    local value, err = self:_request("POST", self.session .. "/window/new", { type = "tab" })
-    if not value then return nil, err end
-    return value.handle or value
+    return self:new_window("tab")
 end
 
 function WebDriver:close_window()
@@ -1195,7 +1408,27 @@ function WebDriver:set_window_rect(rect)
     rect = strict_table("webdriver.set_window_rect(rect)", rect, {
         x = true, y = true, width = true, height = true,
     })
-    local value, err = self:_request("POST", self.session .. "/window/rect", rect)
+
+    local function coordinate(name, value, minimum, maximum)
+        if value == nil then return nil end
+        if value == json.null then return json.null end
+        value = finite_number("webdriver.set_window_rect: " .. name, value)
+        if value < minimum or value > maximum then
+            error(string.format(
+                "webdriver.set_window_rect: %s doit être compris entre %d et %d",
+                name, minimum, maximum
+            ), 3)
+        end
+        return value
+    end
+
+    local body = {}
+    body.x = coordinate("x", rect.x, -2147483648, 2147483647)
+    body.y = coordinate("y", rect.y, -2147483648, 2147483647)
+    body.width = coordinate("width", rect.width, 0, 2147483647)
+    body.height = coordinate("height", rect.height, 0, 2147483647)
+
+    local value, err = self:_request("POST", self.session .. "/window/rect", body)
     if err then return nil, err end
     return value
 end
@@ -1204,16 +1437,25 @@ function WebDriver:window_rect()
     return self:_request("GET", self.session .. "/window/rect")
 end
 
+local function window_state(driver, endpoint)
+    return driver:_request("POST", driver.session .. "/window/" .. endpoint, {})
+end
+
+function WebDriver:maximize() return window_state(self, "maximize") end
+function WebDriver:minimize() return window_state(self, "minimize") end
+function WebDriver:fullscreen() return window_state(self, "fullscreen") end
+
 function WebDriver:frame(target)
     local id
     if target == nil then
         id = json.null
-    elseif type(target) == "number" and math.type(target) == "integer" and target >= 0 then
+    elseif type(target) == "number" and math.type(target) == "integer"
+        and target >= 0 and target <= 65535 then
         id = target
     elseif M.is_element(target) then
         id = { [ELEMENT_KEY] = target.id }
     else
-        error("webdriver.frame: cible attendue = nil, index entier ou Element", 2)
+        error("webdriver.frame: cible attendue = nil, index entier 0..65535 ou Element", 2)
     end
     local _, err = self:_request("POST", self.session .. "/frame", { id = id })
     if err then return nil, err end
@@ -1254,6 +1496,13 @@ function WebDriver:cookies()
     return self:_request("GET", self.session .. "/cookie")
 end
 
+function WebDriver:cookie(name)
+    if type(name) ~= "string" or name == "" then
+        error("webdriver.cookie: name doit être une chaîne non vide", 2)
+    end
+    return self:_request("GET", self.session .. "/cookie/" .. url_segment(name))
+end
+
 function WebDriver:set_cookie(cookie)
     if type(cookie) ~= "table" then
         error("webdriver.set_cookie: cookie doit être une table", 2)
@@ -1278,6 +1527,25 @@ function WebDriver:clear_cookies()
     return true
 end
 
+function WebDriver:get_timeouts()
+    local value, err, code = self:_request("GET", self.session .. "/timeouts")
+    if value == nil then return nil, err, code end
+    if type(value) ~= "table" then return fail("réponse de timeouts invalide") end
+    local function from_milliseconds(name, raw)
+        if raw == json.null then return json.null end
+        if type(raw) ~= "number" or raw ~= raw or raw < 0
+            or raw == math.huge or raw == -math.huge then
+            error("webdriver: timeout W3C invalide reçu pour " .. name, 3)
+        end
+        return raw / 1000
+    end
+    return {
+        implicit = from_milliseconds("implicit", value.implicit),
+        page_load = from_milliseconds("pageLoad", value.pageLoad),
+        script = from_milliseconds("script", value.script),
+    }
+end
+
 function WebDriver:set_timeouts(timeouts)
     timeouts = strict_table("webdriver.set_timeouts(timeouts)", timeouts, {
         implicit = true,
@@ -1287,11 +1555,17 @@ function WebDriver:set_timeouts(timeouts)
     local body = {}
     local function to_milliseconds(name, value)
         if value == nil then return nil end
+        if value == json.null then return json.null end
         if type(value) ~= "number" or value ~= value or value < 0
             or value == math.huge or value == -math.huge then
-            error("webdriver.set_timeouts: " .. name .. " doit être un nombre fini positif ou nul", 3)
+            error("webdriver.set_timeouts: " .. name
+                .. " doit être un nombre fini positif, nul ou json.null", 3)
         end
-        return math.floor(value * 1000)
+        local milliseconds = value * 1000
+        if milliseconds > 9007199254740991 then
+            error("webdriver.set_timeouts: " .. name .. " dépasse la limite W3C sûre", 3)
+        end
+        return math.floor(milliseconds)
     end
     body.implicit = to_milliseconds("implicit", timeouts.implicit)
     body.pageLoad = to_milliseconds("page_load", timeouts.page_load)
@@ -1366,6 +1640,16 @@ end
 function Element:text() return self.driver:_request("GET", element_url(self, "/text")) end
 function Element:tag() return self.driver:_request("GET", element_url(self, "/name")) end
 function Element:rect() return self.driver:_request("GET", element_url(self, "/rect")) end
+function Element:computed_role() return self.driver:_request("GET", element_url(self, "/computedrole")) end
+function Element:computed_label() return self.driver:_request("GET", element_url(self, "/computedlabel")) end
+
+function Element:shadow_root()
+    local value, err, code = self.driver:_request("GET", element_url(self, "/shadow"))
+    if value == nil then return nil, err, code end
+    local shadow = wrap_shadow_root(self.driver, value)
+    if not shadow then return fail("réponse de ShadowRoot invalide") end
+    return shadow
+end
 local function element_name(name, label)
     if type(name) ~= "string" or name == "" then
         error("webdriver Element:" .. label .. ": nom doit être une chaîne non vide", 3)
@@ -1465,18 +1749,60 @@ function Element:screenshot(path)
     )
 end
 
+function ShadowRoot:shadow_root_id() return self.id end
+
+local function shadow_url(shadow, suffix)
+    return shadow.driver.session .. "/shadow/" .. url_segment(shadow.id) .. suffix
+end
+
+function ShadowRoot:find(selector, opts)
+    local using, value = locator(selector, opts)
+    local response, err, code = self.driver:_request("POST", shadow_url(self, "/element"), {
+        using = using,
+        value = value,
+    })
+    if response == nil then return nil, err, code end
+    local element = wrap_element(self.driver, response)
+    if not element then return fail("réponse d'élément Shadow DOM invalide") end
+    return element
+end
+
+function ShadowRoot:find_all(selector, opts)
+    local using, value = locator(selector, opts)
+    local response, err, code = self.driver:_request("POST", shadow_url(self, "/elements"), {
+        using = using,
+        value = value,
+    })
+    if response == nil then return nil, err, code end
+    if type(response) ~= "table" then return fail("réponse de liste Shadow DOM invalide") end
+    local out = {}
+    for _, raw in ipairs(response) do
+        local element = wrap_element(self.driver, raw)
+        if not element then return fail("réponse de liste Shadow DOM invalide") end
+        out[#out + 1] = element
+    end
+    return out
+end
+
 function WebDriver:actions()
-    return setmetatable({ driver = self, key = {}, pointer = {} }, Actions)
+    return setmetatable({
+        driver = self,
+        key = {},
+        pointer = {},
+        wheel = {},
+        wheel_active = false,
+    }, Actions)
 end
 
 local function add_action(actions, device, action)
-    if device == "pointer" then
-        actions.pointer[#actions.pointer + 1] = action
-        actions.key[#actions.key + 1] = { type = "pause", duration = 0 }
-    else
-        actions.key[#actions.key + 1] = action
-        actions.pointer[#actions.pointer + 1] = { type = "pause", duration = 0 }
+    for _, current in ipairs({ "key", "pointer", "wheel" }) do
+        if current == device then
+            actions[current][#actions[current] + 1] = action
+        else
+            actions[current][#actions[current] + 1] = { type = "pause", duration = 0 }
+        end
     end
+    if device == "wheel" then actions.wheel_active = true end
 end
 
 local function pointer_down(actions, button)
@@ -1491,6 +1817,10 @@ local function key_event(actions, kind, character)
     if type(character) ~= "string" or character == "" then
         error("webdriver Actions: touche doit être une chaîne non vide", 3)
     end
+    local ok, length = pcall(utf8.len, character)
+    if not ok or length ~= 1 then
+        error("webdriver Actions: key_down/key_up attend exactement un caractère Unicode", 3)
+    end
     add_action(actions, "key", { type = kind, value = character })
 end
 
@@ -1498,27 +1828,27 @@ function Actions:move_to(element, x, y)
     if element ~= nil and not M.is_element(element) then
         error("webdriver Actions:move_to: element invalide", 2)
     end
-    x = finite_number("webdriver Actions:move_to: x", x, 0)
-    y = finite_number("webdriver Actions:move_to: y", y, 0)
+    x = finite_integer("webdriver Actions:move_to: x", x, 0)
+    y = finite_integer("webdriver Actions:move_to: y", y, 0)
     add_action(self, "pointer", {
         type = "pointerMove",
         duration = 100,
         origin = element and { [ELEMENT_KEY] = element.id } or "viewport",
-        x = math.floor(x),
-        y = math.floor(y),
+        x = x,
+        y = y,
     })
     return self
 end
 
 function Actions:move_by(x, y)
-    x = finite_number("webdriver Actions:move_by: x", x)
-    y = finite_number("webdriver Actions:move_by: y", y)
+    x = finite_integer("webdriver Actions:move_by: x", x)
+    y = finite_integer("webdriver Actions:move_by: y", y)
     add_action(self, "pointer", {
         type = "pointerMove",
         duration = 100,
         origin = "pointer",
-        x = math.floor(x),
-        y = math.floor(y),
+        x = x,
+        y = y,
     })
     return self
 end
@@ -1578,13 +1908,41 @@ function Actions:send_keys(text)
 end
 
 function Actions:pause(milliseconds)
-    milliseconds = finite_number("webdriver Actions:pause: durée", milliseconds, 0)
+    milliseconds = finite_integer("webdriver Actions:pause: durée", milliseconds, 0)
     if milliseconds < 0 then
         error("webdriver Actions:pause: durée positive ou nulle attendue", 2)
     end
-    milliseconds = math.floor(milliseconds)
-    self.key[#self.key + 1] = { type = "pause", duration = milliseconds }
-    self.pointer[#self.pointer + 1] = { type = "pause", duration = milliseconds }
+    for _, current in ipairs({ "key", "pointer", "wheel" }) do
+        self[current][#self[current] + 1] = { type = "pause", duration = milliseconds }
+    end
+    return self
+end
+
+local SCROLL_OPTIONS = { x = true, y = true, duration = true, origin = true }
+
+function Actions:scroll(delta_x, delta_y, options)
+    delta_x = finite_integer("webdriver Actions:scroll: delta_x", delta_x)
+    delta_y = finite_integer("webdriver Actions:scroll: delta_y", delta_y)
+    local opts = strict_table("webdriver Actions:scroll(opts)", options, SCROLL_OPTIONS)
+    local x = finite_integer("webdriver Actions:scroll: x", opts.x, 0)
+    local y = finite_integer("webdriver Actions:scroll: y", opts.y, 0)
+    local duration = finite_integer("webdriver Actions:scroll: duration", opts.duration, 0)
+    if duration < 0 then error("webdriver Actions:scroll: duration doit être positive ou nulle", 2) end
+    local origin = opts.origin or "viewport"
+    if M.is_element(origin) then
+        origin = { [ELEMENT_KEY] = origin.id }
+    elseif origin ~= "viewport" then
+        error("webdriver Actions:scroll: origin doit valoir 'viewport' ou être un Element", 2)
+    end
+    add_action(self, "wheel", {
+        type = "scroll",
+        duration = duration,
+        origin = origin,
+        x = x,
+        y = y,
+        deltaX = delta_x,
+        deltaY = delta_y,
+    })
     return self
 end
 
@@ -1599,30 +1957,36 @@ function Actions:perform()
         end
         return as_json_array(list)
     end
-    local body = {
-        actions = as_json_array({
-            {
-                type = "key",
-                id = "keyboard",
-                actions = sequence(self.key),
-            },
-            {
-                type = "pointer",
-                id = "mouse",
-                parameters = { pointerType = "mouse" },
-                actions = sequence(self.pointer),
-            },
-        }),
+    local sources = {
+        {
+            type = "key",
+            id = "keyboard",
+            actions = sequence(self.key),
+        },
+        {
+            type = "pointer",
+            id = "mouse",
+            parameters = { pointerType = "mouse" },
+            actions = sequence(self.pointer),
+        },
     }
+    if self.wheel_active then
+        sources[#sources + 1] = {
+            type = "wheel",
+            id = "wheel",
+            actions = sequence(self.wheel),
+        }
+    end
+    local body = { actions = as_json_array(sources) }
     local _, err = self.driver:_request("POST", self.driver.session .. "/actions", body)
-    self.key, self.pointer = {}, {}
+    self.key, self.pointer, self.wheel, self.wheel_active = {}, {}, {}, false
     if err then return nil, err end
     return true
 end
 
 function Actions:clear()
     local _, err = self.driver:_request("DELETE", self.driver.session .. "/actions")
-    self.key, self.pointer = {}, {}
+    self.key, self.pointer, self.wheel, self.wheel_active = {}, {}, {}, false
     if err then return nil, err end
     return true
 end

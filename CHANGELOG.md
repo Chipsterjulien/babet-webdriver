@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.1.0 — WebDriver Classic complet et socle prêt pour BiDi
+
+### Corrections de validation
+
+- Corrige le transport des appels worker comportant plusieurs arguments quand le premier est une table (par exemple `session:print(options, path)`).
+- Ajoute `run_all_tests.sh`, qui exécute toute la campagne tout en affichant la sortie dans le terminal et en l’enregistrant dans `babet-webdriver-tests.txt`.
+- Durcit ce journal de tests : temporaire unique dans le répertoire cible, publication finale atomique, conservation de l’ancien journal en cas d’interruption et verrou `flock` contre deux campagnes concurrentes.
+
+- version centralisée dans `webdriver_version.lua`, partagée par le client, le worker et le gestionnaire de drivers ;
+- ajout de `active_element()` et `get_timeouts()` ;
+- ajout de `new_window()`, `maximize()`, `minimize()` et `fullscreen()` ;
+- ajout de `js_async()` pour `Execute Async Script` et préservation explicite de `babet.json.null` dans les arguments/résultats JavaScript ;
+- ajout de `cookie(name)` pour lire un cookie individuel ;
+- prise en charge W3C du Shadow DOM avec objets `ShadowRoot`, `find()` et `find_all()` ;
+- ajout de `computed_role()` et `computed_label()` sur les éléments ;
+- ajout de `print()` avec validation stricte des options W3C et publication atomique des PDF ;
+- ajout de la source d'actions `wheel` via `actions():scroll()`, avec validation des entiers W3C ;
+- validation renforcée des timeouts (`json.null` compris), rectangles de fenêtre et index de frame ;
+- parité du proxy worker pour les nouvelles commandes et transport des références `ShadowRoot` ;
+- extension du faux serveur WebDriver et des tests de protocole/worker à la nouvelle surface Classic ;
+- smoke tests réels enrichis et nettoyage/ignorance des artefacts temporaires de test ;
+- documentation française et anglaise mise à jour, avec conservation de Babet 2.9.0 comme version minimale pour WebDriver Classic.
+
 ## 1.0.6 — lien officiel et version minimale de Babet
 
 - ajout du dépôt officiel de Babet dans le README et les documentations française et anglaise ;

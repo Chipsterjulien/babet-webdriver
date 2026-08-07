@@ -16,7 +16,7 @@ chromedriver. Babet est disponible sur son
 - [Recherche et attentes](#recherche-et-attentes)
 - [Éléments](#éléments)
 - [JavaScript](#javascript)
-- [Actions clavier et souris](#actions-clavier-et-souris)
+- [Actions clavier, souris et molette](#actions-clavier-souris-et-molette)
 - [Fenêtres, onglets et frames](#fenêtres-onglets-et-frames)
 - [Alertes, cookies et timeouts](#alertes-cookies-et-timeouts)
 - [Captures d'écran](#captures-décran)
@@ -27,8 +27,8 @@ chromedriver. Babet est disponible sur son
 
 ## Installation
 
-Les fichiers `webdriver.lua`, `driver_manager.lua` et éventuellement
-`webdriver_worker.lua` doivent être accessibles par `package.path`.
+Les fichiers `webdriver.lua`, `webdriver_version.lua`, `driver_manager.lua` et
+éventuellement `webdriver_worker.lua` doivent être accessibles par `package.path`.
 
 ```lua
 local webdriver = require("webdriver")
@@ -52,12 +52,13 @@ Pour piloter un navigateur depuis le script principal, copie uniquement :
 ```text
 mon-projet/
 ├── webdriver.lua
+├── webdriver_version.lua
 ├── driver_manager.lua
 └── main.lua
 ```
 
-`webdriver.lua` charge `driver_manager.lua` en interne. Les deux modules sont
-donc requis même si geckodriver ou chromedriver est déjà installé.
+`webdriver.lua` charge `webdriver_version.lua` et `driver_manager.lua` en interne.
+Les trois modules sont donc requis même si geckodriver ou chromedriver est déjà installé.
 
 Avec les modules à côté de `main.lua`, le chargement reste direct :
 
@@ -73,6 +74,7 @@ ajoute le proxy :
 ```text
 mon-projet/
 ├── webdriver.lua
+├── webdriver_version.lua
 ├── driver_manager.lua
 ├── webdriver_worker.lua
 └── main.lua
@@ -101,6 +103,7 @@ Binaire local au projet :
 mon-projet/
 ├── bin/babet
 ├── webdriver.lua
+├── webdriver_version.lua
 ├── driver_manager.lua
 └── main.lua
 ```
@@ -132,8 +135,8 @@ Babet situé à un chemin quelconque :
 /opt/babet/bin/babet main.lua
 ```
 
-Dans le dépôt babet-webdriver, les scripts `run_tests.sh`, `run_smoke.sh` et
-`run_worker_smoke.sh` cherchent le binaire dans cet ordre :
+Dans le dépôt babet-webdriver, les scripts `run_tests.sh`, `run_smoke.sh`,
+`run_worker_smoke.sh` et `run_all_tests.sh` cherchent le binaire dans cet ordre :
 
 1. chemin fourni par `BABET` ;
 2. `bin/babet` ;
@@ -144,6 +147,18 @@ Exemple :
 ```sh
 BABET=/opt/babet/bin/babet ./run_tests.sh
 ```
+
+Pour lancer toute la campagne de validation en une seule commande :
+
+```sh
+./run_all_tests.sh
+```
+
+Le script active le mode headless par défaut, affiche le déroulé en direct dans
+le terminal et copie exactement la même sortie dans `babet-webdriver-tests.txt`.
+Le journal est d'abord écrit dans un fichier temporaire unique du même répertoire, puis publié atomiquement à la fin de la campagne. Un journal complet existant n'est donc jamais tronqué pendant les tests. `flock` (util-linux) verrouille le journal : un second lancement visant le même fichier est refusé tant que le premier est actif. Une campagne terminée, réussie ou en échec, remplace le journal précédent afin de pouvoir être transmise telle quelle.
+`HEADLESS=0` permet d'afficher les navigateurs et `TEST_LOG=/chemin/test.txt`
+permet de choisir un autre fichier.
 
 ### Exemple minimal complet
 
@@ -185,6 +200,7 @@ Si tu préfères ranger les modules dans `lib/` :
 mon-projet/
 ├── lib/
 │   ├── webdriver.lua
+│   ├── webdriver_version.lua
 │   ├── driver_manager.lua
 │   └── webdriver_worker.lua
 └── main.lua
@@ -334,6 +350,9 @@ local driver = assert(webdriver.firefox({
 | `screenshot_max_size` | 64 Mio | limite après décodage Base64 |
 | `screenshot_permissions` | 0644 | permissions du PNG publié |
 | `screenshot_durable` | `true` | fsync du fichier et du dossier |
+| `print_max_size` | 64 Mio | limite du PDF après décodage Base64 |
+| `print_permissions` | 0644 | permissions du PDF publié |
+| `print_durable` | `true` | fsync du PDF et du dossier |
 | `log_path` | automatique | fichier de log exact |
 | `log_dir` | cache/logs | dossier des logs automatiques |
 | `log_append` | `true` | ajoute au log au lieu de tronquer |
@@ -511,6 +530,8 @@ print(assert(element:property("value")))
 print(assert(element:dom_attr("data-id")))
 print(assert(element:attr("textContent")))
 print(assert(element:value()))
+print(assert(element:computed_role()))
+print(assert(element:computed_label()))
 ```
 
 `attr()` imite le comportement pratique de Selenium : il tente l'attribut HTML,
@@ -534,6 +555,18 @@ local button = assert(row:find("button.save"))
 local cells = assert(row:find_all("td"))
 ```
 
+Shadow DOM W3C :
+
+```lua
+local host = assert(driver:css("my-component"))
+local shadow = assert(host:shadow_root())
+assert(webdriver.is_shadow_root(shadow))
+local button = assert(shadow:find("button.primary"))
+local items = assert(shadow:find_all("li"))
+```
+
+L'élément actuellement actif est accessible avec `driver:active_element()`.
+
 ## JavaScript
 
 ```lua
@@ -547,9 +580,18 @@ Les objets Element présents dans les arguments sont sérialisés avec la clé W
 Les éléments renvoyés par le script sont reconstruits automatiquement, y compris
 au sein d'une table imbriquée.
 
-Les tables cycliques sont refusées avant l'envoi.
+Les tables cycliques sont refusées avant l'envoi. Une valeur JavaScript `null`
+est conservée sous la forme `babet.json.null`, ce qui la distingue d'un `nil`
+d'erreur. La variante asynchrone W3C est exposée par `js_async()` :
 
-## Actions clavier et souris
+```lua
+local value = assert(driver:js_async([[
+  const done = arguments[arguments.length - 1];
+  setTimeout(() => done("prêt"), 10);
+]]))
+```
+
+## Actions clavier, souris et molette
 
 ```lua
 assert(driver:actions()
@@ -573,13 +615,18 @@ key_down(character)
 key_up(character)
 send_keys(text)
 pause(milliseconds)
+scroll(delta_x, delta_y [, opts])
 drag_and_drop(source, destination)
 perform()
 clear()
 ```
 
-Le builder aligne les sources clavier et souris tick par tick. `perform()` remet
-les séquences à zéro.
+Le builder aligne les sources clavier, souris et molette tick par tick.
+`scroll()` émet une source W3C `wheel` ; son origine peut être `"viewport"` ou
+un `Element`, avec `x`, `y` et `duration` facultatifs. Les coordonnées, deltas et
+la durée sont des entiers conformément au protocole ; `move_to()`, `move_by()` et
+`pause()` appliquent la même validation stricte. `perform()` remet les
+séquences à zéro.
 
 Les touches spéciales sont exposées dans `webdriver.keys`, par exemple :
 
@@ -598,6 +645,8 @@ local handles = assert(driver:windows())
 assert(driver:switch(handles[#handles]))
 assert(driver:switch_last())
 local new_handle = assert(driver:new_tab())
+local window_handle, kind = assert(driver:new_window("window"))
+assert(kind == "window")
 assert(driver:close_window())
 ```
 
@@ -606,6 +655,9 @@ Rectangles :
 ```lua
 assert(driver:set_window_rect({ x = 0, y = 0, width = 1280, height = 900 }))
 local rect = assert(driver:window_rect())
+assert(driver:maximize())
+assert(driver:minimize())
+assert(driver:fullscreen())
 ```
 
 Frames :
@@ -632,6 +684,7 @@ assert(driver:dismiss_alert())
 
 ```lua
 local cookies = assert(driver:cookies())
+local theme = assert(driver:cookie("theme"))
 assert(driver:set_cookie({ name = "theme", value = "dark" }))
 assert(driver:delete_cookie("theme"))
 assert(driver:clear_cookies())
@@ -650,6 +703,11 @@ assert(driver:set_timeouts({
     page_load = 60,
     script = 30,
 }))
+local timeouts = assert(driver:get_timeouts())
+print(timeouts.page_load)
+
+-- W3C autorise null pour supprimer une limite lorsque le driver le supporte.
+assert(driver:set_timeouts({ script = babet.json.null }))
 ```
 
 ## Captures d'écran
@@ -672,6 +730,20 @@ assert(element:screenshot("captures/button.png"))
 Le dossier parent est créé récursivement si nécessaire. Grâce à la publication
 atomique, un lecteur voit l'ancien fichier complet ou le nouveau, jamais un PNG
 partiel.
+
+L'impression W3C renvoie un PDF en Base64 ou le publie atomiquement lorsqu'un
+chemin est fourni :
+
+```lua
+local encoded_pdf = assert(driver:print({ orientation = "portrait" }))
+assert(driver:print({
+    orientation = "landscape",
+    background = true,
+    page = { width = 21, height = 29.7 },
+    margin = { top = 1, bottom = 1, left = 1, right = 1 },
+    page_ranges = { "1-2", 4 },
+}, "captures/page.pdf"))
+```
 
 ## Gestion automatique des drivers
 
@@ -752,7 +824,7 @@ assert(session:stop())
 Avant de créer le worker, le parent prépare le driver si nécessaire. Plusieurs
 workers ne téléchargent donc pas simultanément le même artefact.
 
-### Proxies d'éléments
+### Proxies d'éléments et de Shadow DOM
 
 Un élément WebDriver n'est pas envoyé comme userdata. Le worker transmet son
 identifiant W3C et le parent crée un proxy :
@@ -761,6 +833,14 @@ identifiant W3C et le parent crée un proxy :
 local element = assert(session:css("h1"))
 assert(worker_driver.is_element(element))
 print(element:element_id())
+```
+
+Un `ShadowRoot` suit le même principe :
+
+```lua
+local shadow = assert(element:shadow_root())
+assert(worker_driver.is_shadow_root(shadow))
+local button = assert(shadow:find("button"))
 ```
 
 Les proxies peuvent être réutilisés comme arguments de `js()` ou `frame()`.

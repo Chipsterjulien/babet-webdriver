@@ -48,11 +48,13 @@ babet-webdriver/
 ├── tests/                   # tests mock, worker et smoke tests réels
 ├── tools/check_env.lua      # diagnostic de l'environnement
 ├── driver_manager.lua       # téléchargement, cache et vérification
+├── webdriver_version.lua    # source de vérité de la version
 ├── webdriver.lua            # client WebDriver principal
 ├── webdriver_worker.lua     # proxy de session dans un worker
 ├── run_tests.sh
 ├── run_smoke.sh
-└── run_worker_smoke.sh
+├── run_worker_smoke.sh
+└── run_all_tests.sh       # campagne complète + journal .txt
 ```
 
 Les modules principaux restent à la racine pour conserver un usage simple :
@@ -70,18 +72,20 @@ Pour un projet WebDriver direct, le strict minimum est :
 ```text
 mon-projet/
 ├── webdriver.lua
+├── webdriver_version.lua
 ├── driver_manager.lua
 └── main.lua
 ```
 
-`webdriver.lua` charge `driver_manager.lua` en interne : les deux fichiers sont
-nécessaires, même lorsqu'un driver est déjà présent dans `PATH`.
+`webdriver.lua` charge `driver_manager.lua` et `webdriver_version.lua` en interne :
+les trois fichiers sont nécessaires, même lorsqu'un driver est déjà présent dans `PATH`.
 
 Pour héberger la session dans un worker Babet, ajoute simplement :
 
 ```text
 mon-projet/
 ├── webdriver.lua
+├── webdriver_version.lua
 ├── driver_manager.lua
 ├── webdriver_worker.lua
 └── main.lua
@@ -105,6 +109,7 @@ sont équivalentes :
    mon-projet/
    ├── bin/babet
    ├── webdriver.lua
+   ├── webdriver_version.lua
    ├── driver_manager.lua
    └── main.lua
    ```
@@ -132,6 +137,20 @@ un chemin quelconque :
 ```sh
 BABET=/opt/babet/bin/babet ./run_tests.sh
 ```
+
+Pour lancer toute la campagne (tests locaux + smoke Firefox/Chromium + workers)
+et obtenir en même temps un journal prêt à partager :
+
+```sh
+./run_all_tests.sh
+```
+
+Le mode headless est activé par défaut. La sortie reste visible en direct dans
+le terminal et est copiée dans `babet-webdriver-tests.txt`. La campagne construit d'abord un journal temporaire
+unique puis le publie atomiquement à la fin : un ancien journal complet n'est jamais tronqué pendant les tests.
+`flock` (util-linux) verrouille le journal : deux campagnes visant le même fichier ne peuvent pas s'exécuter en parallèle. Le fichier final est remplacé à chaque campagne terminée pour
+rester simple à transmettre. `TEST_LOG=/chemin/fichier.txt` permet de choisir
+un autre emplacement.
 
 Les scripts cherchent désormais Babet dans cet ordre : `BABET`, `bin/babet`,
 puis le `PATH`.
@@ -195,6 +214,7 @@ Une autre organisation reste possible :
 mon-projet/
 ├── lib/
 │   ├── webdriver.lua
+│   ├── webdriver_version.lua
 │   ├── driver_manager.lua
 │   └── webdriver_worker.lua
 └── main.lua
@@ -267,6 +287,8 @@ Options courantes :
 | `attach` | se connecte à un driver déjà lancé |
 | `request_timeout` | timeout HTTP WebDriver général |
 | `status_timeout` | timeout court des sondes `/status` |
+| `print_max_size` | limite du PDF après décodage Base64 |
+| `print_permissions` / `print_durable` | publication atomique des PDF |
 | `log_path` / `log_dir` | destination des logs du processus driver |
 
 Toutes les options de `webdriver.start()` sont strictes : une faute de frappe
@@ -339,16 +361,22 @@ assert(element:click())
 assert(element:type("texte"))
 element:text(); element:attr("href"); element:property("value")
 element:displayed(); element:enabled(); element:selected()
+element:computed_role(); element:computed_label()
+local shadow = element:shadow_root()
+local inside = shadow:find("button")
 
--- JavaScript et captures
+-- JavaScript synchrone/asynchrone et sorties
 local value = driver:js("return arguments[0].textContent", element)
+local async_value = driver:js_async("arguments[arguments.length - 1](42)")
 assert(driver:screenshot("captures/page.png"))
+assert(driver:print({ orientation = "landscape" }, "captures/page.pdf"))
 
 -- actions W3C
 assert(driver:actions()
     :move_to(element)
     :double_click()
     :send_keys(webdriver.keys.DELETE)
+    :scroll(0, 600, { origin = element })
     :perform())
 ```
 
@@ -361,6 +389,16 @@ if exists then
     -- l'élément existe
 end
 ```
+
+### WebDriver Classic 1.1.0
+
+La branche Classic couvre désormais aussi les commandes W3C modernes qui
+manquaient encore : élément actif, lecture des timeouts, nouvelle fenêtre ou
+nouvel onglet, maximisation/minimisation/plein écran, JavaScript asynchrone,
+cookie individuel, Shadow DOM, rôle/label calculés, impression PDF et source
+d'actions `wheel`. Le mode worker transporte également les `ShadowRoot` et toutes
+les nouvelles commandes sérialisables ; seul le builder chaînable `actions()`
+reste volontairement réservé aux sessions directes.
 
 ## Session dans un worker
 

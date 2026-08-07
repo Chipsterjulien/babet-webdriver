@@ -14,7 +14,7 @@ if (babet.VERSION_MAJOR or 0) < 2
     error("driver_manager: Babet 2.9.0 ou supérieur est requis", 2)
 end
 
-local DM = { VERSION = "1.0.2" }
+local DM = { VERSION = require("webdriver_version") }
 local json = assert(babet.json)
 local http = assert(babet.http)
 
@@ -24,7 +24,7 @@ DM.pins_file = DM.cache_dir .. "/pins.json" -- ancien format, lu pour migration
 DM.pins_dir = DM.cache_dir .. "/pins"
 DM.chrome_version = nil
 DM.gecko_version = nil
-DM.user_agent = "babet-webdriver/1.0"
+DM.user_agent = "babet-webdriver/" .. DM.VERSION
 
 -- Pins intégrés facultatifs : ["nom|plateforme|version"] = sha256_archive.
 DM.registry_pins = {}

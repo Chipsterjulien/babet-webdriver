@@ -2,6 +2,15 @@
 -- SPDX-License-Identifier: GPL-3.0-or-later
 -- Copyright (C) 2026 Julien
 
+local script_dir = babet.currentDir()
+local root = babet.joinPath(script_dir, "..")
+package.path = root .. "/?.lua;" .. package.path
+
+local expected_version = require("webdriver_version")
+local webdriver = require("webdriver")
+local worker_driver = require("webdriver_worker")
+local driver_manager = require("driver_manager")
+
 local function resolve(path)
     local current = _G
     for part in path:gmatch("[^.]+") do
@@ -27,6 +36,12 @@ local required = {
 
 print("== Vérification de l'environnement Babet WebDriver ==")
 print("Babet détecté : " .. tostring(babet.VERSION or "inconnu"))
+print("babet-webdriver : " .. tostring(expected_version))
+local version_ok = webdriver.VERSION == expected_version
+    and worker_driver.VERSION == expected_version
+    and driver_manager.VERSION == expected_version
+    and driver_manager.user_agent == "babet-webdriver/" .. expected_version
+print(("  [%s] version interne cohérente"):format(version_ok and "OK " or "NON"))
 
 local compatible = (babet.VERSION_MAJOR or 0) > 2
     or ((babet.VERSION_MAJOR or 0) == 2 and (babet.VERSION_MINOR or 0) >= 9)
@@ -113,7 +128,7 @@ for name, path in pairs(browser_candidates) do
 end
 
 print(("\n== %d fonction(s) manquante(s) =="):format(missing))
-if compatible and missing == 0 and base64_ok and atomic_ok and channel_ok then
+if compatible and version_ok and missing == 0 and base64_ok and atomic_ok and channel_ok then
     print("Environnement Babet compatible avec la bibliothèque.")
     os.exit(0)
 end

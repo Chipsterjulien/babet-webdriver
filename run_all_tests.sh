@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -u
+set -o pipefail
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+LOG=${TEST_LOG:-"$ROOT/babet-webdriver-tests.txt"}
+HEADLESS=${HEADLESS:-1}
+export HEADLESS
+
+LOG_DIR=$(dirname -- "$LOG")
+mkdir -p "$LOG_DIR"
+
+# Deux campagnes simultanées ne doivent pas se mélanger ni publier un journal
+# dans un ordre ambigu. Babet WebDriver cible Linux ; flock (util-linux) fournit
+# ici un verrou de processus robuste qui est libéré automatiquement à la fin.
+if ! command -v flock >/dev/null 2>&1; then
+    printf "[FAIL] commande 'flock' requise pour verrouiller le journal de tests.\n" >&2
+    exit 127
+fi
+
+LOCK_FILE="${LOG_DIR}/.$(basename -- "$LOG").lock"
+exec 9>>"$LOCK_FILE" || {
+    printf '[FAIL] impossible d’ouvrir le verrou : %s\n' "$LOCK_FILE" >&2
+    exit 1
+}
+if ! flock -n 9; then
+    printf '[FAIL] une campagne de tests écrit déjà vers : %s\n' "$LOG" >&2
+    exit 75
+fi
+
+# La campagne construit son journal dans un fichier temporaire unique situé
+# dans le même répertoire que la destination. Le mv final est donc un rename
+# atomique : l'ancien journal complet reste intact pendant toute l'exécution.
+TMP_LOG=$(mktemp "${LOG}.tmp.XXXXXX") || {
+    printf '[FAIL] impossible de créer le journal temporaire pour : %s\n' "$LOG" >&2
+    exit 1
+}
+
+cleanup() {
+    rm -f -- "$TMP_LOG"
+}
+
+on_signal() {
+    local status=$1
+    trap - EXIT HUP INT TERM
+    cleanup
+    exit "$status"
+}
+
+trap cleanup EXIT
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+
+run_suite() {
+    printf '============================================================\n'
+    printf 'Babet WebDriver — campagne complète de tests\n'
+    printf '============================================================\n'
+    printf 'Date      : %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
+    printf 'HEADLESS  : %s\n' "$HEADLESS"
+    printf 'Journal   : %s\n' "$LOG"
+    printf '\n'
+
+    printf '=== Tests environnement + protocole + worker ===\n'
+    "$ROOT/run_tests.sh" || return $?
+
+    printf '\n=== Smoke direct — Firefox ===\n'
+    "$ROOT/run_smoke.sh" firefox || return $?
+
+    printf '\n=== Smoke direct — Chromium ===\n'
+    "$ROOT/run_smoke.sh" chromium || return $?
+
+    printf '\n=== Smoke worker — Firefox ===\n'
+    "$ROOT/run_worker_smoke.sh" firefox || return $?
+
+    printf '\n=== Smoke worker — Chromium ===\n'
+    "$ROOT/run_worker_smoke.sh" chromium || return $?
+}
+
+# tee garde le déroulé visible dans le terminal, mais écrit uniquement dans le
+# temporaire privé de cette campagne. PIPESTATUS conserve le vrai statut des
+# tests indépendamment de tee.
+run_suite 2>&1 | tee "$TMP_LOG"
+statuses=("${PIPESTATUS[@]}")
+test_status=${statuses[0]:-1}
+tee_status=${statuses[1]:-1}
+
+if (( tee_status != 0 )); then
+    printf '\n[FAIL] impossible d’écrire complètement le journal temporaire.\n' >&2
+    exit "$tee_status"
+fi
+
+if (( test_status != 0 )); then
+    summary=$(printf '\n============================================================\n[FAIL] campagne interrompue (code %d)\nJournal : %s\n============================================================\n' \
+        "$test_status" "$LOG")
+else
+    summary=$(printf '\n============================================================\n[PASS] campagne complète terminée\nJournal : %s\n============================================================\n' \
+        "$LOG")
+fi
+
+printf '%s\n' "$summary" | tee -a "$TMP_LOG"
+summary_status=${PIPESTATUS[1]:-1}
+if (( summary_status != 0 )); then
+    printf '\n[FAIL] impossible de finaliser le journal temporaire.\n' >&2
+    exit "$summary_status"
+fi
+
+# Publication atomique dans le même répertoire. Une campagne terminée en échec
+# reste utile pour le diagnostic et remplace donc elle aussi l'ancien journal ;
+# une campagne interrompue par signal ne le remplace jamais.
+if ! mv -f -- "$TMP_LOG" "$LOG"; then
+    printf '\n[FAIL] impossible de publier atomiquement le journal : %s\n' "$LOG" >&2
+    exit 1
+fi
+trap - EXIT HUP INT TERM
+
+exit "$test_status"

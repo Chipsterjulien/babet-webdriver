@@ -70,3 +70,16 @@ ressources. La méthode est idempotente et possède l'alias `close()`.
 - `pronote_example.lua` devient `examples/pronote.lua` ;
 - `smoke_test.lua` devient `tests/smoke_test.lua` ;
 - `check_env.lua` devient `tools/check_env.lua`.
+
+
+## Mise à niveau vers babet-webdriver 1.1.0
+
+La 1.1.0 ne retire aucune API WebDriver Classic existante. Elle ajoute toutefois
+`webdriver_version.lua` comme source de vérité unique de la version. Si les
+modules sont copiés manuellement dans un autre projet, il faut donc copier ce
+fichier avec `webdriver.lua` et `driver_manager.lua` (et avec
+`webdriver_worker.lua` lorsque le mode worker est utilisé).
+
+Les nouveaux appels (`js_async`, Shadow DOM, impression PDF, commandes de
+fenêtre supplémentaires et actions `wheel`) sont additifs. La dépendance minimale
+du client WebDriver Classic reste **Babet 2.9.0**.

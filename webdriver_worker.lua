@@ -9,11 +9,13 @@ if type(babet) ~= "table" or not babet.workers or not babet.workers.channel then
     error("webdriver_worker: Babet 2.9.0 ou supérieur est requis", 2)
 end
 
-local M = { VERSION = "1.0.2" }
+local M = { VERSION = require("webdriver_version") }
 local Session = {}
 Session.__index = Session
 local ElementProxy = {}
 ElementProxy.__index = ElementProxy
+local ShadowRootProxy = {}
+ShadowRootProxy.__index = ShadowRootProxy
 
 local source = debug.getinfo(1, "S").source
 local MODULE_DIR = "."
@@ -110,13 +112,15 @@ local results = assert(worker.channels.results)
 local DRIVER_METHODS = {
     open=true, url=true, title=true, source=true, back=true, forward=true, refresh=true,
     find=true, find_all=true, css=true, xpath=true, id=true, name=true, tag=true,
-    exists=true, wait=true, js=true, screenshot=true,
-    window=true, windows=true, switch=true, switch_last=true, new_tab=true,
+    exists=true, wait=true, js=true, js_async=true, screenshot=true, print=true,
+    active_element=true,
+    window=true, windows=true, switch=true, switch_last=true, new_tab=true, new_window=true,
     close_window=true, set_window_rect=true, window_rect=true,
+    maximize=true, minimize=true, fullscreen=true,
     frame=true, top_frame=true, parent_frame=true,
     alert_text=true, accept_alert=true, dismiss_alert=true, alert_send=true,
-    cookies=true, set_cookie=true, delete_cookie=true, clear_cookies=true,
-    set_timeouts=true, capabilities=true, port=true, pid=true, log_path=true,
+    cookies=true, cookie=true, set_cookie=true, delete_cookie=true, clear_cookies=true,
+    get_timeouts=true, set_timeouts=true, capabilities=true, port=true, pid=true, log_path=true,
     browser_binary=true, is_running=true,
 }
 
@@ -124,7 +128,11 @@ local ELEMENT_METHODS = {
     click=true, clear=true, type=true, text=true, tag=true, rect=true,
     css=true, property=true, dom_attr=true, displayed=true, enabled=true,
     selected=true, attr=true, value=true, submit=true, find=true, find_all=true,
-    screenshot=true, element_id=true,
+    screenshot=true, computed_role=true, computed_label=true, shadow_root=true, element_id=true,
+}
+
+local SHADOW_METHODS = {
+    find=true, find_all=true, shadow_root_id=true,
 }
 
 local driver, start_err = webdriver.start(worker.args.options)
@@ -140,6 +148,9 @@ local function import_value(value, seen)
     if value.__babet_webdriver_element then
         return webdriver.element(driver, value.__babet_webdriver_element)
     end
+    if value.__babet_webdriver_shadow_root then
+        return webdriver.shadow_root(driver, value.__babet_webdriver_shadow_root)
+    end
     seen = seen or {}
     if seen[value] then error("worker webdriver: table cyclique reçue") end
     seen[value] = true
@@ -154,6 +165,9 @@ local function export_value(value, seen)
     if value == babet.json.null then return { [TRANSPORT_JSON_NULL_KEY] = true } end
     if webdriver.is_element(value) then
         return { __babet_webdriver_element = assert(webdriver.element_id(value)) }
+    end
+    if webdriver.is_shadow_root(value) then
+        return { __babet_webdriver_shadow_root = assert(webdriver.shadow_root_id(value)) }
     end
     if type(value) ~= "table" then return value end
     seen = seen or {}
@@ -206,6 +220,9 @@ while not worker.cancelled() do
         elseif command.target == "element" then
             target = webdriver.element(driver, assert(command.element_id))
             allowed = ELEMENT_METHODS
+        elseif command.target == "shadow" then
+            target = webdriver.shadow_root(driver, assert(command.shadow_id))
+            allowed = SHADOW_METHODS
         end
 
         if not target or not allowed[command.method] then
@@ -273,6 +290,12 @@ local function import_parent_value(session, value, seen)
             element_id_value = value.__babet_webdriver_element,
         }, ElementProxy)
     end
+    if value.__babet_webdriver_shadow_root then
+        return setmetatable({
+            session = session,
+            shadow_root_id_value = value.__babet_webdriver_shadow_root,
+        }, ShadowRootProxy)
+    end
     seen = seen or {}
     if seen[value] then return seen[value] end
     local out = {}
@@ -287,6 +310,9 @@ local function export_parent_value(value, seen)
     if type(value) ~= "table" then return value end
     if getmetatable(value) == ElementProxy then
         return { __babet_webdriver_element = value.element_id_value }
+    end
+    if getmetatable(value) == ShadowRootProxy then
+        return { __babet_webdriver_shadow_root = value.shadow_root_id_value }
     end
     seen = seen or {}
     if seen[value] then
@@ -318,20 +344,21 @@ function Session:_receive(expected_id, timeout)
     return table.unpack(values, 1, values.n)
 end
 
-function Session:_call(target, element_id, method, ...)
+function Session:_call(target, reference_id, method, ...)
     if self.closed then return nil, "webdriver_worker: session fermée" end
     self.next_id = self.next_id + 1
     local id = self.next_id
     local count = select("#", ...)
     local args = {}
     for index = 1, count do
-        args[index] = export_parent_value(select(index, ...))
+        args[index] = export_parent_value((select(index, ...)))
     end
     local sent, send_err = self.commands:send({
         kind = "call",
         id = id,
         target = target,
-        element_id = element_id,
+        element_id = target == "element" and reference_id or nil,
+        shadow_id = target == "shadow" and reference_id or nil,
         method = method,
         arg_count = count,
         args = args,
@@ -401,11 +428,12 @@ Session.__close = function(self) self:stop() end
 
 local DRIVER_METHODS = {
     "open", "url", "title", "source", "back", "forward", "refresh",
-    "find", "find_all", "css", "xpath", "id", "name", "tag", "exists", "wait",
-    "js", "screenshot", "window", "windows", "switch", "switch_last", "new_tab",
-    "close_window", "set_window_rect", "window_rect", "frame", "top_frame",
+    "find", "find_all", "active_element", "css", "xpath", "id", "name", "tag", "exists", "wait",
+    "js", "js_async", "screenshot", "print", "window", "windows", "switch", "switch_last",
+    "new_tab", "new_window", "close_window", "set_window_rect", "window_rect",
+    "maximize", "minimize", "fullscreen", "frame", "top_frame",
     "parent_frame", "alert_text", "accept_alert", "dismiss_alert", "alert_send",
-    "cookies", "set_cookie", "delete_cookie", "clear_cookies", "set_timeouts",
+    "cookies", "cookie", "set_cookie", "delete_cookie", "clear_cookies", "get_timeouts", "set_timeouts",
     "capabilities", "port", "pid", "log_path", "browser_binary", "is_running",
 }
 
@@ -422,7 +450,7 @@ end
 local ELEMENT_METHODS = {
     "click", "clear", "type", "text", "tag", "rect", "css", "property",
     "dom_attr", "displayed", "enabled", "selected", "attr", "value", "submit",
-    "find", "find_all", "screenshot",
+    "find", "find_all", "screenshot", "computed_role", "computed_label", "shadow_root",
 }
 
 for _, method in ipairs(ELEMENT_METHODS) do
@@ -431,8 +459,23 @@ for _, method in ipairs(ELEMENT_METHODS) do
     end
 end
 
+function ShadowRootProxy:shadow_root_id()
+    return self.shadow_root_id_value
+end
+
+local SHADOW_METHODS = { "find", "find_all" }
+for _, method in ipairs(SHADOW_METHODS) do
+    ShadowRootProxy[method] = function(self, ...)
+        return self.session:_call("shadow", self.shadow_root_id_value, method, ...)
+    end
+end
+
 function M.is_element(value)
     return type(value) == "table" and getmetatable(value) == ElementProxy
+end
+
+function M.is_shadow_root(value)
+    return type(value) == "table" and getmetatable(value) == ShadowRootProxy
 end
 
 function M.start(options)

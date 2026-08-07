@@ -106,11 +106,65 @@ if result.title ~= title or result.hasBody ~= true or type(result.userAgent) ~= 
 end
 pass(result.userAgent:sub(1, 50) .. "…")
 
+step("JavaScript asynchrone à travers le worker")
+local async_value, async_err = session:js_async([[
+    const done = arguments[arguments.length - 1];
+    setTimeout(() => done("async-worker-ok"), 10);
+]])
+if not async_value then abort(async_err) end
+if async_value ~= "async-worker-ok" then abort("retour JavaScript asynchrone inattendu") end
+pass(async_value)
+
+step("élément actif et ShadowRoot à travers les channels")
+local prepared, prepare_err = session:js([[
+    const heading = document.querySelector("h1");
+    heading.tabIndex = 0;
+    heading.focus();
+    const previous = document.querySelector("#babet-shadow-host");
+    if (previous) previous.remove();
+    const host = document.createElement("div");
+    host.id = "babet-shadow-host";
+    document.body.appendChild(host);
+    const root = host.attachShadow({ mode: "open" });
+    root.innerHTML = '<button id="inside">Shadow Worker OK</button>';
+    return true;
+]])
+if not prepared then abort(prepare_err) end
+local active, active_err = session:active_element()
+if not active then abort(active_err) end
+if not worker_driver.is_element(active) then abort("élément actif non transporté") end
+local host, host_err = session:css("#babet-shadow-host")
+if not host then abort(host_err) end
+local shadow, shadow_err = host:shadow_root()
+if not shadow then abort(shadow_err) end
+if not worker_driver.is_shadow_root(shadow) then abort("ShadowRoot non transporté") end
+local inside, inside_err = shadow:find("#inside")
+if not inside then abort(inside_err) end
+local inside_text, inside_text_err = inside:text()
+if not inside_text then abort(inside_text_err) end
+if inside_text ~= "Shadow Worker OK" then abort("contenu Shadow DOM inattendu") end
+pass(inside_text)
+
+step("lecture des timeouts W3C à travers le worker")
+local timeouts, timeouts_err = session:get_timeouts()
+if not timeouts then abort(timeouts_err) end
+if type(timeouts.implicit) ~= "number" or type(timeouts.page_load) ~= "number" then
+    abort("timeouts W3C inattendus")
+end
+pass(("implicit=%ss, page_load=%ss"):format(timeouts.implicit, timeouts.page_load))
+
 local screenshot = "/tmp/babet-webdriver-worker-smoke.png"
 step("capture d'écran depuis le worker vers " .. screenshot)
 local saved, screenshot_err = session:screenshot(screenshot)
 if not saved then abort(screenshot_err) end
 if not babet.isFile(screenshot) then abort("la capture n'a pas été créée") end
+pass()
+
+local pdf = "/tmp/babet-webdriver-worker-smoke.pdf"
+step("impression PDF depuis le worker vers " .. pdf)
+local printed, print_err = session:print({ background = true }, pdf)
+if not printed then abort(print_err) end
+if not babet.isFile(pdf) then abort("le PDF worker n'a pas été créé") end
 pass()
 
 step("arrêt coopératif et jointure du worker")
@@ -121,3 +175,4 @@ pass()
 
 print("\n== TOUT EST VERT VIA LE WORKER ==")
 print("Capture : " .. screenshot)
+print("PDF     : " .. pdf)
