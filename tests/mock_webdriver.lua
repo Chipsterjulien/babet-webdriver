@@ -95,9 +95,14 @@ while not stopping and not worker.cancelled() do
             if method == "GET" and path == "/status" then
                 reply(client, 200, { ready = true, message = "mock ready" })
             elseif method == "POST" and path == "/session" then
+                local always_match = decoded and decoded.capabilities and decoded.capabilities.alwaysMatch or {}
+                local capabilities = { browserName = "mock", platformName = "linux" }
+                if always_match.webSocketUrl == true then
+                    capabilities.webSocketUrl = "ws://127.0.0.1:65535/mock-session"
+                end
                 reply(client, 200, {
                     sessionId = "mock-session",
-                    capabilities = { browserName = "mock", platformName = "linux" },
+                    capabilities = capabilities,
                 })
 
             elseif method == "POST" and path == "/session/mock-session/url" then
@@ -122,6 +127,13 @@ while not stopping and not worker.cancelled() do
                     reply(client, 200, json.null)
                 elseif decoded and decoded.script == "return arguments[0]" then
                     reply(client, 200, args[1] == nil and json.null or args[1])
+                elseif decoded and tostring(decoded.script):find("getAttribute", 1, true) then
+                    local name = args[2]
+                    if name == "missing" then
+                        reply(client, 200, json.null)
+                    else
+                        reply(client, 200, "mock-attr-" .. tostring(name))
+                    end
                 else
                     reply(client, 200, {
                         count = #args,

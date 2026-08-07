@@ -2,7 +2,7 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-BROWSER=${1:-firefox}
+BROWSER=${1:-chromium}
 
 if [ -n "${BABET:-}" ]; then
     CANDIDATE=$BABET
@@ -11,8 +11,7 @@ elif [ -x "$ROOT/bin/babet" ]; then
 elif command -v babet >/dev/null 2>&1; then
     CANDIDATE=$(command -v babet)
 else
-    echo "Babet 2.22.0+ introuvable pour la suite de tests 2.0." >&2
-    echo "Définis BABET=/chemin/vers/babet, place-le dans bin/babet ou ajoute-le au PATH." >&2
+    echo "Babet 2.22.0+ introuvable pour le smoke d'installation." >&2
     exit 2
 fi
 
@@ -24,15 +23,17 @@ fi
 BABET_DIR=$(CDPATH= cd -- "$(dirname -- "$CANDIDATE")" && pwd)
 BABET_NAME=$(basename -- "$CANDIDATE")
 BABET="$BABET_DIR/$BABET_NAME"
-
-# Les scripts Lua utilisent #!/usr/bin/env babet. Si le fichier fourni porte un
-# autre nom, expose temporairement un lien nommé babet sans modifier le système.
 if [ "$BABET_NAME" != "babet" ]; then
     TMP_BIN="$ROOT/.cache/test-bin"
     mkdir -p "$TMP_BIN"
     ln -sf "$BABET" "$TMP_BIN/babet"
     BABET_DIR="$TMP_BIN"
 fi
-
 export PATH="$BABET_DIR:$PATH"
-exec "$ROOT/tests/smoke_test.lua" "$BROWSER"
+
+CACHE=$(mktemp -d "${TMPDIR:-/tmp}/babet-webdriver-install.XXXXXX") || exit 1
+cleanup() { rm -rf -- "$CACHE"; }
+trap cleanup EXIT HUP INT TERM
+export WEBDRIVER_INSTALL_CACHE="$CACHE"
+
+"$ROOT/tests/install_smoke_test.lua" "$BROWSER"

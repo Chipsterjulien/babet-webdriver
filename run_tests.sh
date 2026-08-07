@@ -9,7 +9,7 @@ elif [ -x "$ROOT/bin/babet" ]; then
 elif command -v babet >/dev/null 2>&1; then
     CANDIDATE=$(command -v babet)
 else
-    echo "Babet 2.9.0+ introuvable." >&2
+    echo "Babet 2.22.0+ introuvable pour la suite de tests 2.0." >&2
     echo "Définis BABET=/chemin/vers/babet, place-le dans bin/babet ou ajoute-le au PATH." >&2
     exit 2
 fi
@@ -35,4 +35,5 @@ fi
 export PATH="$BABET_DIR:$PATH"
 "$ROOT/tools/check_env.lua"
 "$ROOT/tests/protocol_test.lua"
+"$ROOT/tests/bidi_test.lua"
 "$ROOT/tests/worker_test.lua"

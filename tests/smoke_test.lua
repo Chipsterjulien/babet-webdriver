@@ -50,6 +50,7 @@ driver, start_err = constructor({
     headless = headless,
     window_size = { 1280, 900 },
     trust_on_first_use = allow_tofu,
+    bidi = true,
 })
 if not driver then abort(start_err) end
 local binary = driver:browser_binary()
@@ -130,6 +131,78 @@ pass(("implicit=%ss, page_load=%ss"):format(timeouts.implicit, timeouts.page_loa
 step("action wheel W3C")
 local wheel_ok, wheel_err = driver:actions():scroll(0, 100):perform()
 if not wheel_ok then abort(wheel_err) end
+pass()
+
+step("négociation WebDriver BiDi")
+local websocket_url = driver:websocket_url()
+if type(websocket_url) ~= "string" or websocket_url == "" then
+    abort("capability webSocketUrl absente")
+end
+local bidi, bidi_err = driver:bidi({ timeout = 10, command_timeout = 15 })
+if not bidi then abort(bidi_err) end
+local bidi_status, bidi_status_err = bidi:status()
+if not bidi_status then abort(bidi_status_err) end
+if type(bidi_status.ready) ~= "boolean" then abort("session.status BiDi invalide") end
+pass("webSocketUrl négociée")
+
+step("arbre des contextes BiDi")
+local tree, tree_err = bidi:get_tree({ max_depth = 0 })
+if not tree then abort(tree_err) end
+local context = tree.contexts and tree.contexts[1] and tree.contexts[1].context
+if type(context) ~= "string" or context == "" then abort("contexte BiDi principal introuvable") end
+pass(context)
+
+step("script.evaluate BiDi")
+local evaluated, evaluate_err = bidi:evaluate("document.title", context)
+if not evaluated then abort(evaluate_err) end
+if evaluated.type ~= "success" or type(evaluated.result) ~= "table"
+    or evaluated.result.type ~= "string" or evaluated.result.value ~= title then
+    abort("résultat script.evaluate inattendu")
+end
+pass(evaluated.result.value)
+
+step("événements log et network BiDi")
+local subscription, subscribe_err = bidi:subscribe({
+    "log.entryAdded",
+    "network.beforeRequestSent",
+    "browsingContext.load",
+})
+if not subscription then abort(subscribe_err) end
+local nav_url = "https://example.com/?babet-bidi-smoke=1"
+local navigated, navigate_err = bidi:navigate(context, nav_url, { wait = "complete" })
+if not navigated then abort(navigate_err) end
+local logged, log_err = bidi:evaluate('console.log("babet-bidi-smoke"); "logged"', context)
+if not logged then abort(log_err) end
+
+local saw_network, saw_log = false, false
+local deadline = babet.monotonic() + 10
+while babet.monotonic() < deadline and (not saw_network or not saw_log) do
+    local event, event_err, event_code = bidi:next_event(math.max(0, deadline - babet.monotonic()))
+    if not event then
+        if event_code ~= "timeout" then abort(event_err) end
+        break
+    end
+    if event.method == "network.beforeRequestSent" then
+        local request = event.params and event.params.request
+        if type(request) == "table" and type(request.url) == "string"
+            and request.url:find("babet%-bidi%-smoke=1") then
+            saw_network = true
+        end
+    elseif event.method == "log.entryAdded" then
+        local text_value = event.params and event.params.text
+        if type(text_value) == "string" and text_value:find("babet%-bidi%-smoke") then
+            saw_log = true
+        end
+    end
+end
+if not saw_network then abort("événement network.beforeRequestSent non reçu") end
+if not saw_log then abort("événement log.entryAdded non reçu") end
+assert(bidi:unsubscribe(subscription))
+pass("log + network")
+
+step("fermeture du transport BiDi")
+local bidi_closed, bidi_close_err = bidi:close(1000, "smoke complete", 5)
+if not bidi_closed then abort(bidi_close_err) end
 pass()
 
 local screenshot = "/tmp/babet-webdriver-smoke.png"

@@ -11,11 +11,82 @@ local worker_driver = require("webdriver_worker")
 local driver_manager = require("driver_manager")
 local version = require("webdriver_version")
 
-assert(version == "1.1.1")
+assert(version == "2.0.0")
 assert(webdriver.VERSION == version)
 assert(worker_driver.VERSION == version)
 assert(driver_manager.VERSION == version)
 assert(driver_manager.user_agent == "babet-webdriver/" .. version)
+
+local saved_gecko_version = driver_manager.gecko_version
+driver_manager.gecko_version = "vbad/version"
+local bad_gecko, bad_gecko_err = driver_manager.describe("firefox", { platform = "linux-x86_64" })
+assert(bad_gecko == nil and tostring(bad_gecko_err):find("version geckodriver invalide", 1, true))
+driver_manager.gecko_version = saved_gecko_version
+
+-- Le milestone chromedriver doit suivre le binaire Chrome/Chromium réellement
+-- retenu, même si les deux navigateurs coexistent avec des versions différentes.
+do
+    local saved_is_file = babet.isFile
+    local saved_exec = babet.exec
+    local saved_http_get = babet.http.get
+    local cft_body = assert(babet.json.encode({
+        milestones = {
+            ["138"] = {
+                version = "138.0.0.1",
+                downloads = { chromedriver = {
+                    { platform = "linux64", url = "https://example.test/chromedriver-138.zip" },
+                } },
+            },
+            ["141"] = {
+                version = "141.0.0.1",
+                downloads = { chromedriver = {
+                    { platform = "linux64", url = "https://example.test/chromedriver-141.zip" },
+                } },
+            },
+        },
+    }))
+    babet.isFile = function(path)
+        if path == "/mock/google-chrome" or path == "/mock/chromium" then return true end
+        return saved_is_file(path)
+    end
+    babet.exec = function(path, args, options)
+        if path == "/mock/google-chrome" then
+            return { code = 0, stdout = "Google Chrome 138.0.7204.1", stderr = "" }
+        end
+        if path == "/mock/chromium" then
+            return { code = 0, stdout = "Chromium 141.0.7300.1", stderr = "" }
+        end
+        return saved_exec(path, args, options)
+    end
+    babet.http.get = function(url, options)
+        if url:find("latest%-versions%-per%-milestone%-with%-downloads%.json") then
+            return { status = 200, body = cft_body }
+        end
+        return saved_http_get(url, options)
+    end
+
+    local chrome_desc = assert(driver_manager.describe("chrome", {
+        platform = "linux-x86_64",
+        browser_binary = "/mock/google-chrome",
+    }))
+    local chromium_desc = assert(driver_manager.describe("chromium", {
+        platform = "linux-x86_64",
+        browser_binary = "/mock/chromium",
+    }))
+
+    babet.isFile = saved_is_file
+    babet.exec = saved_exec
+    babet.http.get = saved_http_get
+
+    assert(chrome_desc.version == "138.0.0.1")
+    assert(chromium_desc.version == "141.0.0.1")
+end
+
+assert(webdriver.keys.SEPARATOR == "\u{E026}")
+assert(webdriver.keys.RIGHT_SHIFT == "\u{E050}")
+assert(webdriver.keys.RIGHT_CONTROL == "\u{E051}")
+assert(webdriver.keys.RIGHT_ALT == "\u{E052}")
+assert(webdriver.keys.RIGHT_META == "\u{E053}")
 
 assert(babet.mkdir(script_dir .. "/tmp"))
 
@@ -31,13 +102,21 @@ assert(ok_fractional_window_size == false)
 
 local server = assert(mock.start())
 
-local driver = assert(webdriver.firefox({
+local expected_sha256 = string.rep("A", 64)
+local start_options = {
     attach = true,
     port = server.port,
     request_timeout = 5,
     status_timeout = 1,
     start_timeout = 5,
-}))
+    expected_sha256 = expected_sha256,
+}
+local driver = assert(webdriver.firefox(start_options))
+assert(start_options.expected_sha256 == expected_sha256)
+
+assert(driver:websocket_url() == nil)
+local classic_bidi, classic_bidi_err = driver:bidi()
+assert(classic_bidi == nil and tostring(classic_bidi_err):find("BiDi non négocié", 1, true))
 
 assert(driver:open("https://example.test/path"))
 assert(driver:url() == "https://example.test/path")
@@ -60,6 +139,8 @@ assert(async_result.async == true)
 assert(driver:js("return null") == babet.json.null)
 assert(driver:js("return arguments[0]", babet.json.null) == babet.json.null)
 assert(driver:js_async("arguments[arguments.length - 1](null)") == babet.json.null)
+local empty_array = assert(driver:js("return arguments[0]", babet.json.as_array({})))
+assert(assert(babet.json.encode(empty_array)) == "[]")
 
 local element = assert(driver:css("h1"))
 assert(webdriver.is_element(element))
@@ -71,6 +152,9 @@ assert(element_rect.width == 300 and element_rect.height == 40)
 assert(element:css("color") == "rgb(0, 0, 0)")
 assert(element:property("value") == "mock-value")
 assert(element:dom_attr("data-test") == "mock-attribute")
+assert(element:attr("title") == "mock-attr-title")
+local missing_attr, missing_attr_err = element:attr("missing")
+assert(missing_attr == nil and missing_attr_err == nil)
 assert(element:displayed() == true)
 assert(element:enabled() == true)
 assert(element:selected() == false)
@@ -238,5 +322,26 @@ assert(chromium:quit())
 local chromium_joined, chromium_result = chromium_server.job:join(5)
 assert(chromium_joined, chromium_result)
 assert(babet.rmdirAll(chromium_profile))
+
+local bidi_server = assert(mock.start())
+local bidi_driver = assert(webdriver.firefox({
+    attach = true,
+    port = bidi_server.port,
+    bidi = true,
+    request_timeout = 5,
+    status_timeout = 1,
+    start_timeout = 5,
+}))
+assert(bidi_driver:websocket_url() == "ws://127.0.0.1:65535/mock-session")
+assert(bidi_driver:capabilities().webSocketUrl == bidi_driver:websocket_url())
+assert(bidi_driver:quit())
+local bidi_joined, bidi_result = bidi_server.job:join(5)
+assert(bidi_joined, bidi_result)
+
+local ok_invalid_bidi = pcall(function()
+    webdriver.firefox({ attach = true, port = 1, bidi = "yes" })
+end)
+assert(ok_invalid_bidi == false)
+
 assert(babet.rmdirAll(script_dir .. "/tmp"))
 print("protocol_test: OK")

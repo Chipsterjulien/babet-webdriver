@@ -23,6 +23,18 @@ local http = assert(babet.http, "webdriver: module babet.http indisponible")
 local json = assert(babet.json, "webdriver: module babet.json indisponible")
 local base64 = assert(babet.base64, "webdriver: module babet.base64 indisponible")
 
+-- babet.json distingue explicitement un tableau JSON vide [] d'un objet vide
+-- {} grâce à la métatable posée par as_array(). Les copies internes doivent
+-- préserver uniquement ce marqueur JSON, jamais les métatables utilisateur.
+local JSON_ARRAY_MT = getmetatable(json.as_array({}))
+
+local function preserve_json_array(source, target)
+    if JSON_ARRAY_MT ~= nil and rawequal(getmetatable(source), JSON_ARRAY_MT) then
+        return json.as_array(target)
+    end
+    return target
+end
+
 local VERSION = require("webdriver_version")
 local ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf"
 local SHADOW_KEY = "shadow-6066-11e4-a52e-4f735466cecf"
@@ -266,7 +278,7 @@ local function wrap_result(driver, value, seen)
     for key, child in pairs(value) do
         out[wrap_result(driver, key, seen)] = wrap_result(driver, child, seen)
     end
-    return out
+    return preserve_json_array(value, out)
 end
 
 local function encode_argument(value, seen)
@@ -292,7 +304,7 @@ local function encode_argument(value, seen)
         out[key] = encode_argument(child, seen)
     end
     seen[value] = nil
-    return out
+    return preserve_json_array(value, out)
 end
 
 local function decode_response(response)
@@ -461,6 +473,7 @@ local START_OPTIONS = {
     log_append = true,
     log_permissions = true,
     terminate_grace = true,
+    bidi = true,
 }
 
 local function validate_port(port)
@@ -496,7 +509,7 @@ end
 
 local function timestamp_token()
     local value = babet.monotonic()
-    return tostring(value):gsub("[^0-9]", "")
+    return (tostring(value):gsub("[^0-9]", ""))
 end
 
 local function default_log_path(opts, descriptor, port)
@@ -531,6 +544,7 @@ end
 local function wait_ready(base_url, process, start_timeout, status_timeout, poll_interval, log_path)
     local start = babet.monotonic()
     local last_error
+    local saw_not_ready = false
     while babet.monotonic() - start < start_timeout do
         if process then
             local running, running_err = process:is_running()
@@ -554,11 +568,17 @@ local function wait_ready(base_url, process, start_timeout, status_timeout, poll
             status_timeout,
             1024 * 1024
         )
-        if type(value) == "table" and value.ready == true then
-            return true
+        if type(value) == "table" then
+            if value.ready == true then return true end
+            if value.ready == false then saw_not_ready = true end
         end
         last_error = request_err
         babet.sleep(poll_interval, "s")
+    end
+    if saw_not_ready then
+        return nil, ("webdriver: driver joignable mais indisponible pour une nouvelle session "
+            .. "après %.3fs (ready=false)%s")
+            :format(start_timeout, log_path and ("; log: " .. log_path) or "")
     end
     return nil, ("webdriver: driver injoignable après %.3fs%s%s")
         :format(
@@ -568,7 +588,7 @@ local function wait_ready(base_url, process, start_timeout, status_timeout, poll
         )
 end
 
-local function resolve_driver_path(opts, descriptor, browser)
+local function resolve_driver_path(opts, descriptor, browser, browser_binary)
     if opts.driver_path then
         if not babet.isFile(opts.driver_path) then
             return nil, "webdriver: driver introuvable: " .. opts.driver_path
@@ -592,6 +612,7 @@ local function resolve_driver_path(opts, descriptor, browser)
         platform = opts.platform,
         cache = opts.cache,
         force = opts.force_driver_download == true,
+        browser_binary = browser_binary,
     })
 end
 
@@ -713,6 +734,9 @@ local function build_capabilities(opts, descriptor, browser_binary, user_data_di
         acceptInsecureCerts = opts.accept_insecure_certs == true,
         [descriptor.options_key] = browser_options,
     }
+    if opts.bidi == true then
+        always_match.webSocketUrl = true
+    end
     if opts.accept_insecure_certs ~= nil and type(opts.accept_insecure_certs) ~= "boolean" then
         error("webdriver: accept_insecure_certs doit être un booléen", 3)
     end
@@ -720,7 +744,11 @@ local function build_capabilities(opts, descriptor, browser_binary, user_data_di
 end
 
 function M.start(options)
-    local opts = strict_table("webdriver.start(opts)", options, START_OPTIONS)
+    local validated = strict_table("webdriver.start(opts)", options, START_OPTIONS)
+    -- M.start normalise certaines options. Travaille sur une copie afin qu'un
+    -- appelant qui réutilise sa table ne voie jamais ses données modifiées.
+    local opts = {}
+    for key, value in pairs(validated) do opts[key] = value end
     local browser = tostring(opts.browser or "firefox"):lower()
     local descriptor = DRIVERS[browser]
     if not descriptor then
@@ -734,6 +762,7 @@ function M.start(options)
     optional_boolean("webdriver: log_append", opts.log_append)
     optional_boolean("webdriver: screenshot_durable", opts.screenshot_durable)
     optional_boolean("webdriver: print_durable", opts.print_durable)
+    optional_boolean("webdriver: bidi", opts.bidi)
     optional_nonempty_string("webdriver: driver_path", opts.driver_path)
     optional_nonempty_string("webdriver: platform", opts.platform)
     optional_nonempty_string("webdriver: cache", opts.cache)
@@ -747,6 +776,16 @@ function M.start(options)
     if opts.port ~= nil then validate_port(opts.port) end
     if opts.port_attempts ~= nil then
         positive_integer("webdriver: port_attempts", opts.port_attempts)
+    end
+
+    if opts.bidi == true then
+        local major = babet.VERSION_MAJOR or 0
+        local minor = babet.VERSION_MINOR or 0
+        if major < 2 or (major == 2 and minor < 22)
+            or type(babet.websocket) ~= "table"
+            or type(babet.websocket.connect) ~= "function" then
+            return fail("WebDriver BiDi requiert Babet 2.22.0 ou supérieur avec babet.websocket")
+        end
     end
 
     local request_timeout = finite_positive("webdriver: request_timeout", opts.request_timeout, 120)
@@ -794,7 +833,7 @@ function M.start(options)
     local driver_path
     if not opts.attach then
         local path_err
-        driver_path, path_err = resolve_driver_path(opts, descriptor, browser)
+        driver_path, path_err = resolve_driver_path(opts, descriptor, browser, browser_binary)
         if not driver_path then
             return nil, path_err
         end
@@ -940,6 +979,26 @@ function M.start(options)
         return fail(details)
     end
 
+    if opts.bidi == true then
+        local web_socket_url = type(capabilities) == "table" and capabilities.webSocketUrl or nil
+        if type(web_socket_url) ~= "string" or web_socket_url == "" then
+            local details = "session BiDi créée sans capability webSocketUrl exploitable"
+            local session_url = base_url .. "/session/" .. url_segment(session_id)
+            local _, delete_err = transport_request(
+                "DELETE", session_url, nil, math.min(request_timeout, 5), max_body_size)
+            if delete_err then details = details .. "; suppression session: " .. tostring(delete_err) end
+            if process then
+                local _, terminate_err = process:terminate(terminate_grace)
+                local _, close_err = process:close()
+                if terminate_err then details = details .. "; arrêt du driver: " .. tostring(terminate_err) end
+                if close_err then details = details .. "; fermeture du driver: " .. tostring(close_err) end
+            end
+            local _, cleanup_err = remove_tree_best_effort(temporary_profile_dir)
+            if cleanup_err then details = details .. "; " .. tostring(cleanup_err) end
+            return fail(details)
+        end
+    end
+
     local driver = setmetatable({
         browser = browser,
         base_url = base_url,
@@ -1020,6 +1079,52 @@ end
 
 function WebDriver:capabilities()
     return self.capabilities_value
+end
+
+function WebDriver:websocket_url()
+    local value = type(self.capabilities_value) == "table" and self.capabilities_value.webSocketUrl or nil
+    if type(value) == "string" and value ~= "" then return value end
+    return nil
+end
+
+function WebDriver:bidi(options)
+    if self.closed then return nil, "webdriver: session fermée", "invalid session id" end
+    if self._bidi_worker and not self._bidi_worker:is_closed() then
+        return fail("un worker BiDi est déjà attaché à cette session")
+    end
+    if self._bidi_client then
+        if not self._bidi_client:is_closed() then return self._bidi_client end
+        self._bidi_client = nil
+    end
+    local url = self:websocket_url()
+    if not url then
+        return fail("BiDi non négocié : démarrez la session avec { bidi = true }")
+    end
+    local module = require("webdriver_bidi")
+    local client, err, code = module.connect(url, options)
+    if not client then return nil, err, code end
+    self._bidi_client = client
+    return client
+end
+
+function WebDriver:bidi_worker(options)
+    if self.closed then return nil, "webdriver: session fermée", "invalid session id" end
+    if self._bidi_client and not self._bidi_client:is_closed() then
+        return fail("un client BiDi direct est déjà attaché à cette session")
+    end
+    if self._bidi_worker then
+        if not self._bidi_worker:is_closed() then return self._bidi_worker end
+        self._bidi_worker = nil
+    end
+    local url = self:websocket_url()
+    if not url then
+        return fail("BiDi non négocié : démarrez la session avec { bidi = true }")
+    end
+    local module = require("webdriver_bidi_worker")
+    local session, err = module.start(url, options)
+    if not session then return nil, err end
+    self._bidi_worker = session
+    return session
 end
 
 function WebDriver:port()
@@ -1579,6 +1684,19 @@ end
 
 function WebDriver:quit()
     if self.closed then return true end
+
+    local bidi_error
+    if self._bidi_worker then
+        local ok, err = self._bidi_worker:close(math.min(self.request_timeout, 5))
+        if not ok then bidi_error = err end
+        self._bidi_worker = nil
+    end
+    if self._bidi_client then
+        local ok, err = self._bidi_client:close(1000, "webdriver quit", math.min(self.request_timeout, 5))
+        if not ok and not bidi_error then bidi_error = err end
+        self._bidi_client = nil
+    end
+
     local session_error
     if self.session_id then
         local _, err = self:_request("DELETE", self.session, nil, math.min(self.request_timeout, 5))
@@ -1611,6 +1729,9 @@ function WebDriver:quit()
     end
     if session_error then
         return nil, session_error
+    end
+    if bidi_error then
+        return nil, bidi_error
     end
     return true
 end
@@ -1688,7 +1809,13 @@ return v === undefined ? null : v;
 ]]
 
 function Element:attr(name)
-    return self.driver:js(ATTRIBUTE_SCRIPT, self, name)
+    local value, err, code = self.driver:js(ATTRIBUTE_SCRIPT, self, name)
+    if value == nil then return nil, err, code end
+    -- Contrairement à js(), attr() suit l'ergonomie Selenium : un attribut
+    -- absent vaut nil. babet.json.null reste préservé pour les résultats JS
+    -- génériques, où nil est réservé au contrat d'erreur (value, err, code).
+    if value == json.null then return nil end
+    return value
 end
 
 function Element:value() return self:property("value") end
@@ -1996,7 +2123,9 @@ end
 M.keys = {
     NULL = "\u{E000}", CANCEL = "\u{E001}", HELP = "\u{E002}", BACKSPACE = "\u{E003}",
     TAB = "\u{E004}", CLEAR = "\u{E005}", RETURN = "\u{E006}", ENTER = "\u{E007}",
-    SHIFT = "\u{E008}", CONTROL = "\u{E009}", ALT = "\u{E00A}", PAUSE = "\u{E00B}",
+    SHIFT = "\u{E008}", LEFT_SHIFT = "\u{E008}", RIGHT_SHIFT = "\u{E050}",
+    CONTROL = "\u{E009}", LEFT_CONTROL = "\u{E009}", RIGHT_CONTROL = "\u{E051}",
+    ALT = "\u{E00A}", LEFT_ALT = "\u{E00A}", RIGHT_ALT = "\u{E052}", PAUSE = "\u{E00B}",
     ESCAPE = "\u{E00C}", SPACE = "\u{E00D}", PAGE_UP = "\u{E00E}", PAGE_DOWN = "\u{E00F}",
     END = "\u{E010}", HOME = "\u{E011}", LEFT = "\u{E012}", UP = "\u{E013}",
     RIGHT = "\u{E014}", DOWN = "\u{E015}", INSERT = "\u{E016}", DELETE = "\u{E017}",
@@ -2004,11 +2133,15 @@ M.keys = {
     NUMPAD0 = "\u{E01A}", NUMPAD1 = "\u{E01B}", NUMPAD2 = "\u{E01C}", NUMPAD3 = "\u{E01D}",
     NUMPAD4 = "\u{E01E}", NUMPAD5 = "\u{E01F}", NUMPAD6 = "\u{E020}", NUMPAD7 = "\u{E021}",
     NUMPAD8 = "\u{E022}", NUMPAD9 = "\u{E023}",
-    MULTIPLY = "\u{E024}", ADD = "\u{E025}", SUBTRACT = "\u{E027}", DECIMAL = "\u{E028}",
+    MULTIPLY = "\u{E024}", ADD = "\u{E025}", SEPARATOR = "\u{E026}",
+    SUBTRACT = "\u{E027}", DECIMAL = "\u{E028}",
     DIVIDE = "\u{E029}",
     F1 = "\u{E031}", F2 = "\u{E032}", F3 = "\u{E033}", F4 = "\u{E034}", F5 = "\u{E035}",
     F6 = "\u{E036}", F7 = "\u{E037}", F8 = "\u{E038}", F9 = "\u{E039}", F10 = "\u{E03A}",
-    F11 = "\u{E03B}", F12 = "\u{E03C}", META = "\u{E03D}", COMMAND = "\u{E03D}",
+    F11 = "\u{E03B}", F12 = "\u{E03C}",
+    META = "\u{E03D}", LEFT_META = "\u{E03D}", RIGHT_META = "\u{E053}",
+    COMMAND = "\u{E03D}", LEFT_COMMAND = "\u{E03D}", RIGHT_COMMAND = "\u{E053}",
+    ZENKAKU_HANKAKU = "\u{E040}",
 }
 
 return M

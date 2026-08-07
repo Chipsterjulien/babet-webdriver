@@ -56,6 +56,7 @@ session, start_err = worker_driver.start({
     headless = headless,
     window_size = { 1280, 900 },
     trust_on_first_use = allow_tofu,
+    bidi = true,
     command_timeout = 120,
     worker_start_timeout = 60,
     stop_timeout = 15,
@@ -103,6 +104,11 @@ local result, js_err = session:js([[
 if not result then abort(js_err) end
 if result.title ~= title or result.hasBody ~= true or type(result.userAgent) ~= "string" then
     abort("résultat JavaScript inattendu")
+end
+local empty_array, empty_array_err = session:js("return arguments[0]", babet.json.as_array({}))
+if not empty_array then abort(empty_array_err) end
+if assert(babet.json.encode(empty_array)) ~= "[]" then
+    abort("tableau JSON vide Classic worker transformé en objet")
 end
 pass(result.userAgent:sub(1, 50) .. "…")
 
@@ -152,6 +158,84 @@ if type(timeouts.implicit) ~= "number" or type(timeouts.page_load) ~= "number" t
     abort("timeouts W3C inattendus")
 end
 pass(("implicit=%ss, page_load=%ss"):format(timeouts.implicit, timeouts.page_load))
+
+step("démarrage du worker BiDi dédié")
+local websocket_url = session:websocket_url()
+if type(websocket_url) ~= "string" or websocket_url == "" then abort("webSocketUrl absente du worker") end
+local bidi, bidi_err = session:bidi({ command_timeout = 1, worker_start_timeout = 15 })
+if not bidi then abort(bidi_err) end
+pass("connecté")
+
+step("session.status via worker BiDi")
+local bidi_status, bidi_status_err = bidi:status(10)
+if not bidi_status then abort(bidi_status_err) end
+pass("ready=" .. tostring(bidi_status.ready))
+
+step("browsingContext.getTree via worker BiDi")
+local tree, tree_err = bidi:get_tree({ max_depth = 0 }, 10)
+if not tree then abort(tree_err) end
+local context = tree.contexts and tree.contexts[1] and tree.contexts[1].context
+if type(context) ~= "string" then abort("contexte BiDi worker introuvable") end
+pass(context)
+
+step("script.evaluate via worker BiDi")
+local evaluated, evaluate_err = bidi:evaluate("document.title", context, nil, 10)
+if not evaluated then abort(evaluate_err) end
+if evaluated.type ~= "success" or evaluated.result.value ~= title then
+    abort("script.evaluate via worker BiDi inattendu")
+end
+local evaluated_array, evaluated_array_err = bidi:evaluate("[]", context, nil, 10)
+if not evaluated_array then abort(evaluated_array_err) end
+local remote_array = evaluated_array.result and evaluated_array.result.value
+if type(remote_array) ~= "table" or assert(babet.json.encode(remote_array)) ~= "[]" then
+    abort("tableau JSON vide BiDi worker transformé en objet")
+end
+pass(evaluated.result.value)
+
+step("timeout explicite supérieur au défaut BiDi worker")
+-- Le timeout explicite d'une commande peut dépasser command_timeout du worker :
+-- le parent doit conserver le même budget et ne pas expirer avant le WebSocket.
+local delayed, delayed_err = bidi:evaluate([[
+    new Promise(resolve => setTimeout(() => resolve("delayed-worker-ok"), 1200))
+]], context, nil, 3)
+if not delayed then abort(delayed_err) end
+if delayed.type ~= "success" or delayed.result.value ~= "delayed-worker-ok" then
+    abort("timeout explicite BiDi worker mal propagé")
+end
+pass(delayed.result.value)
+
+step("événement log.entryAdded via worker BiDi")
+local subscription, subscribe_err = bidi:subscribe("log.entryAdded", nil, 10)
+if not subscription then abort(subscribe_err) end
+local logged, log_err = bidi:evaluate('console.log("babet-bidi-worker-smoke"); "logged"', context, nil, 10)
+if not logged then abort(log_err) end
+local saw_log = false
+local deadline = babet.monotonic() + 10
+while babet.monotonic() < deadline do
+    local event, event_err, event_code = bidi:next_event(math.max(0, deadline - babet.monotonic()))
+    if not event then
+        if event_code ~= "timeout" then abort(event_err) end
+        break
+    end
+    if event.method == "log.entryAdded" then
+        local text_value = event.params and event.params.text
+        if type(text_value) == "string" and text_value:find("babet%-bidi%-worker%-smoke") then
+            saw_log = true
+            break
+        end
+    end
+end
+if not saw_log then abort("log.entryAdded non reçu via worker BiDi") end
+assert(bidi:unsubscribe(subscription, 10))
+pass("reçu")
+
+step("annulation coopérative du worker BiDi")
+local bidi_job = bidi.job
+local cancelled, cancel_err = bidi:cancel()
+if not cancelled then abort(cancel_err) end
+local cancel_joined, cancel_result = bidi_job:join(10)
+if not cancel_joined then abort(cancel_result) end
+pass("worker terminé sans erreur")
 
 local screenshot = "/tmp/babet-webdriver-worker-smoke.png"
 step("capture d'écran depuis le worker vers " .. screenshot)

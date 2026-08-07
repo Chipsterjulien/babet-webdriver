@@ -18,8 +18,33 @@ local DM = { VERSION = require("webdriver_version") }
 local json = assert(babet.json)
 local http = assert(babet.http)
 
-local home = os.getenv("HOME") or "/tmp"
-DM.cache_dir = home .. "/.cache/babet-webdriver"
+local function default_cache_dir()
+    local xdg = os.getenv("XDG_CACHE_HOME")
+    if type(xdg) == "string" and xdg ~= "" then
+        return xdg .. "/babet-webdriver"
+    end
+    local home = os.getenv("HOME")
+    if type(home) == "string" and home ~= "" then
+        return home .. "/.cache/babet-webdriver"
+    end
+
+    -- HOME peut être absent dans certains conteneurs/services. Évite alors le
+    -- cache partagé /tmp/.cache/babet-webdriver, qui peut devenir inexploitable
+    -- dès qu'un autre UID l'a créé en premier.
+    local identity = os.getenv("USER") or os.getenv("LOGNAME")
+    local id = babet.which("id")
+    if id then
+        local result = babet.exec(id, { "-u" }, { timeout = 2, max_output = 1024 })
+        if result and result.code == 0 then
+            local uid = tostring(result.stdout or ""):match("(%d+)")
+            if uid then identity = "uid-" .. uid end
+        end
+    end
+    identity = tostring(identity or "unknown"):gsub("[^A-Za-z0-9._-]", "_")
+    return "/tmp/babet-webdriver-cache-" .. identity
+end
+
+DM.cache_dir = default_cache_dir()
 DM.pins_file = DM.cache_dir .. "/pins.json" -- ancien format, lu pour migration
 DM.pins_dir = DM.cache_dir .. "/pins"
 DM.chrome_version = nil
@@ -37,6 +62,7 @@ local INSTALL_OPTIONS = {
     expected_sha256 = true,
     timeout = true,
     max_download_size = true,
+    browser_binary = true,
 }
 
 local function strict_options(name, value, allowed)
@@ -118,17 +144,65 @@ local function safe_component(value, label)
     return value
 end
 
+local function github_api_token()
+    -- GH_TOKEN est couramment un PAT utilisable hors du dépôt courant. Le
+    -- GITHUB_TOKEN automatique de GitHub Actions est, lui, limité au dépôt du
+    -- workflow ; api_get() sait donc retenter sans authentification si ce token
+    -- ne peut pas lire le dépôt public mozilla/geckodriver.
+    local token = os.getenv("BABET_WEBDRIVER_GITHUB_TOKEN")
+        or os.getenv("GH_TOKEN")
+        or os.getenv("GITHUB_TOKEN")
+    if type(token) == "string" and token ~= "" then return token end
+    return nil
+end
+
+local function api_headers(url, with_token)
+    local headers = {
+        ["User-Agent"] = DM.user_agent,
+        ["Accept"] = "application/json",
+    }
+    local authenticated = false
+    if with_token ~= false and url:match("^https://api%.github%.com/") then
+        local token = github_api_token()
+        if token then
+            headers["Authorization"] = "Bearer " .. token
+            authenticated = true
+        end
+    end
+    return headers, authenticated
+end
+
 local function api_get(url, timeout, max_body_size)
-    local response, err = http.get(url, {
-        headers = {
-            ["User-Agent"] = DM.user_agent,
-            ["Accept"] = "application/json",
-        },
-        timeout = timeout or 30,
-        follow_redirects = true,
-        max_body_size = max_body_size or 4 * 1024 * 1024,
-    })
+    local function request(headers)
+        return http.get(url, {
+            headers = headers,
+            timeout = timeout or 30,
+            follow_redirects = true,
+            max_body_size = max_body_size or 4 * 1024 * 1024,
+        })
+    end
+
+    local headers, authenticated = api_headers(url)
+    local response, err = request(headers)
     if not response then return nil, "driver: requête API: " .. tostring(err) end
+
+    -- Le GITHUB_TOKEN injecté automatiquement dans GitHub Actions est un token
+    -- d'installation limité au dépôt du workflow. Présenté à un autre dépôt
+    -- public, il peut être refusé alors que l'accès anonyme fonctionnerait. Ne
+    -- laisse jamais la simple présence d'un token rendre la résolution moins
+    -- robuste : retente une fois anonymement sur un refus d'auth/rate-limit.
+    if authenticated and url:match("^https://api%.github%.com/")
+        and (response.status == 401 or response.status == 403
+            or response.status == 404 or response.status == 429) then
+        local anonymous_headers = api_headers(url, false)
+        local retry, retry_err = request(anonymous_headers)
+        if retry then
+            response = retry
+        elseif retry_err then
+            err = retry_err
+        end
+    end
+
     if response.status < 200 or response.status >= 300 then
         return nil, ("driver: API HTTP %d pour %s"):format(response.status, url)
     end
@@ -150,7 +224,7 @@ local function resolve_geckodriver(platform, timeout)
     end
 
     if DM.gecko_version and DM.gecko_version ~= "" then
-        local version, version_err = safe_component(DM.gecko_version:gsub("^v", ""), "version geckodriver")
+        local version, version_err = safe_component((DM.gecko_version:gsub("^v", "")), "version geckodriver")
         if not version then return nil, version_err end
         local file = ("geckodriver-v%s-%s"):format(version, asset_suffix)
         return {
@@ -197,17 +271,18 @@ local CFT_PLATFORM = {
     ["linux-x86_64"] = "linux64",
 }
 
-local function detect_chrome_major()
-    local candidates = {
-        "chromium",
-        "chromium-browser",
-        "google-chrome",
-        "google-chrome-stable",
-        "chrome",
-    }
+local function detect_chrome_major(browser, browser_binary)
+    local candidates
+    if type(browser_binary) == "string" and browser_binary ~= "" then
+        candidates = { browser_binary }
+    elseif browser == "chromium" then
+        candidates = { "chromium", "chromium-browser" }
+    else
+        candidates = { "google-chrome-stable", "google-chrome", "chrome" }
+    end
     for _, command in ipairs(candidates) do
-        local path = babet.which(command)
-        if path then
+        local path = command:find("/", 1, true) and command or babet.which(command)
+        if path and babet.isFile(path) then
             local result = babet.exec(path, { "--version" }, {
                 timeout = 5,
                 max_output = 64 * 1024,
@@ -222,7 +297,7 @@ local function detect_chrome_major()
     return nil
 end
 
-local function resolve_chromedriver(platform, timeout)
+local function resolve_chromedriver(browser, platform, timeout, browser_binary)
     local cft_platform = CFT_PLATFORM[platform]
     if not cft_platform then
         return nil, "driver: chromedriver indisponible pour " .. platform
@@ -244,7 +319,7 @@ local function resolve_chromedriver(platform, timeout)
         }
     end
 
-    local major = detect_chrome_major()
+    local major = detect_chrome_major(browser, browser_binary)
     if not major then
         return nil, "driver: Chrome/Chromium introuvable; installe le navigateur ou fixe "
             .. "driver_manager.chrome_version"
@@ -282,7 +357,7 @@ local function resolve_chromedriver(platform, timeout)
     return nil, "driver: URL chromedriver absente pour " .. cft_platform
 end
 
-local function resolve(browser, platform, timeout)
+local function resolve(browser, platform, timeout, browser_binary)
     local name, name_err = driver_name(browser)
     if not name then return nil, name_err end
     if not platform then
@@ -293,16 +368,20 @@ local function resolve(browser, platform, timeout)
     if name == "geckodriver" then
         return resolve_geckodriver(platform, timeout)
     end
-    return resolve_chromedriver(platform, timeout)
+    return resolve_chromedriver(browser, platform, timeout, browser_binary)
 end
 
 function DM.describe(browser, options)
     local opts = strict_options("driver_manager.describe(opts)", options, {
         platform = true,
         timeout = true,
+        browser_binary = true,
     })
     if opts.platform ~= nil then
         nonempty_string("driver_manager.describe: platform", opts.platform)
+    end
+    if opts.browser_binary ~= nil then
+        nonempty_string("driver_manager.describe: browser_binary", opts.browser_binary)
     end
     local timeout = finite_positive("driver_manager.describe: timeout", opts.timeout, 30)
     local platform = opts.platform
@@ -311,7 +390,7 @@ function DM.describe(browser, options)
         platform, platform_err = DM.platform()
         if not platform then return nil, platform_err end
     end
-    local descriptor, err = resolve(browser, platform, timeout)
+    local descriptor, err = resolve(browser, platform, timeout, opts.browser_binary)
     if not descriptor then return nil, err end
     descriptor.platform = platform
     descriptor.key = ("%s|%s|%s"):format(
@@ -398,7 +477,7 @@ end
 
 local function unique_token()
     local raw = tostring(babet.monotonic()) .. "-" .. tostring(math.random(0, 0x7fffffff))
-    return raw:gsub("[^0-9]", "")
+    return (raw:gsub("[^0-9]", ""))
 end
 
 local function expected_archive_hash(descriptor, options, record)
@@ -439,11 +518,16 @@ function DM.verify(browser, options)
         platform = true,
         cache = true,
         timeout = true,
+        browser_binary = true,
     })
     if opts.cache ~= nil then nonempty_string("driver_manager.verify: cache", opts.cache) end
+    if opts.browser_binary ~= nil then
+        nonempty_string("driver_manager.verify: browser_binary", opts.browser_binary)
+    end
     local descriptor, err = DM.describe(browser, {
         platform = opts.platform,
         timeout = opts.timeout,
+        browser_binary = opts.browser_binary,
     })
     if not descriptor then return nil, err end
     local cache = opts.cache or DM.cache_dir
@@ -470,6 +554,9 @@ function DM.install(browser, options)
     end
     if opts.cache ~= nil then nonempty_string("driver_manager.install: cache", opts.cache) end
     if opts.platform ~= nil then nonempty_string("driver_manager.install: platform", opts.platform) end
+    if opts.browser_binary ~= nil then
+        nonempty_string("driver_manager.install: browser_binary", opts.browser_binary)
+    end
     local timeout = finite_positive("driver_manager.install: timeout", opts.timeout, 180)
     local max_download_size = opts.max_download_size or 512 * 1024 * 1024
     if type(max_download_size) ~= "number" or math.type(max_download_size) ~= "integer"
@@ -480,6 +567,7 @@ function DM.install(browser, options)
     local descriptor, describe_err = DM.describe(browser, {
         platform = opts.platform,
         timeout = timeout,
+        browser_binary = opts.browser_binary,
     })
     if not descriptor then return nil, describe_err end
 
@@ -544,12 +632,20 @@ function DM.install(browser, options)
             :format(descriptor.file, expected, archive_hash)
     end
 
+    -- L'extraction se fait vers un fichier unique dans le même répertoire. Le
+    -- rename POSIX final publie ensuite le binaire atomiquement, ce qui évite
+    -- qu'une installation concurrente observe un fichier partiellement écrit.
+    -- Ne balaie pas ici les anciens *.tmp : sans verrou inter-processus ni âge
+    -- fiable, un tel nettoyage pourrait supprimer le staging encore actif
+    -- d'une autre installation concurrente. Un résidu après kill -9 est donc
+    -- inoffensif et sera ignoré par le cache/pin.
+    local staging_path = binary_path .. "." .. unique_token() .. ".tmp"
     local extracted, extract_err = babet.archive.extractFile(
         archive_path,
         descriptor.entry,
-        binary_path,
+        staging_path,
         {
-            overwrite = true,
+            overwrite = false,
             max_entries = 1000,
             max_entry_size = 256 * 1024 * 1024,
             max_total_size = 512 * 1024 * 1024,
@@ -557,19 +653,26 @@ function DM.install(browser, options)
     )
     remove_best_effort(archive_path)
     if not extracted then
+        remove_best_effort(staging_path)
         return nil, "driver: extraction: " .. tostring(extract_err)
     end
 
-    local mode_ok, mode_err = babet.setMode(binary_path, tonumber("755", 8))
+    local mode_ok, mode_err = babet.setMode(staging_path, tonumber("755", 8))
     if not mode_ok then
-        remove_best_effort(binary_path)
+        remove_best_effort(staging_path)
         return nil, "driver: permissions du binaire: " .. tostring(mode_err)
     end
 
-    local binary_hash, binary_hash_err = hash_file(binary_path, "du binaire extrait")
+    local binary_hash, binary_hash_err = hash_file(staging_path, "du binaire extrait")
     if not binary_hash then
-        remove_best_effort(binary_path)
+        remove_best_effort(staging_path)
         return nil, binary_hash_err
+    end
+
+    local published, publish_err = os.rename(staging_path, binary_path)
+    if not published then
+        remove_best_effort(staging_path)
+        return nil, "driver: publication atomique du binaire: " .. tostring(publish_err)
     end
 
     local saved, save_err = save_record(cache, descriptor.key, {
@@ -582,7 +685,6 @@ function DM.install(browser, options)
         binary_sha256 = binary_hash,
     })
     if not saved then
-        remove_best_effort(binary_path)
         return nil, save_err
     end
 

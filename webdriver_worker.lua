@@ -39,6 +39,12 @@ local WORKER_OPTIONS = {
 -- fidèlement les arguments et valeurs de retour nil.
 local TRANSPORT_NIL_KEY = "__babet_webdriver_internal_nil_7e8f8d7b"
 local TRANSPORT_JSON_NULL_KEY = "__babet_webdriver_internal_json_null_29d6a1c4"
+local TRANSPORT_JSON_ARRAY_KEY = "__babet_webdriver_internal_json_array_54f3b8a2"
+local JSON_ARRAY_MT = getmetatable(babet.json.as_array({}))
+
+local function is_json_array(value)
+    return JSON_ARRAY_MT ~= nil and rawequal(getmetatable(value), JSON_ARRAY_MT)
+end
 
 local function copy_driver_options(options)
     local driver = {}
@@ -93,6 +99,7 @@ local function prepare_driver_path(options)
         platform = options.platform,
         cache = options.cache,
         force = options.force_driver_download == true,
+        browser_binary = options.binary,
     })
     if not path then return nil, err end
     options.driver_path = path
@@ -100,9 +107,15 @@ local function prepare_driver_path(options)
 end
 
 local WORKER_CODE = [=[
-local TRANSPORT_NIL_KEY = "__babet_webdriver_internal_nil_7e8f8d7b"
-local TRANSPORT_JSON_NULL_KEY = "__babet_webdriver_internal_json_null_29d6a1c4"
+local TRANSPORT_NIL_KEY = assert(worker.args.nil_key)
+local TRANSPORT_JSON_NULL_KEY = assert(worker.args.json_null_key)
+local TRANSPORT_JSON_ARRAY_KEY = assert(worker.args.json_array_key)
+local JSON_ARRAY_MT = getmetatable(babet.json.as_array({}))
 local root = assert(worker.args.root)
+
+local function is_json_array(value)
+    return JSON_ARRAY_MT ~= nil and rawequal(getmetatable(value), JSON_ARRAY_MT)
+end
 package.path = root .. "/?.lua;" .. package.path
 
 local webdriver = require("webdriver")
@@ -145,6 +158,16 @@ local function import_value(value, seen)
     if type(value) ~= "table" then return value end
     if value[TRANSPORT_NIL_KEY] == true then return nil end
     if value[TRANSPORT_JSON_NULL_KEY] == true then return babet.json.null end
+    if value[TRANSPORT_JSON_ARRAY_KEY] == true then
+        if type(value.value) ~= "table" then error("worker webdriver: marqueur tableau JSON invalide") end
+        seen = seen or {}
+        if seen[value] then error("worker webdriver: table cyclique reçue") end
+        seen[value] = true
+        local out = {}
+        for key, child in pairs(value.value) do out[key] = import_value(child, seen) end
+        seen[value] = nil
+        return babet.json.as_array(out)
+    end
     if value.__babet_webdriver_element then
         return webdriver.element(driver, value.__babet_webdriver_element)
     end
@@ -172,10 +195,14 @@ local function export_value(value, seen)
     if type(value) ~= "table" then return value end
     seen = seen or {}
     if seen[value] then error("worker webdriver: résultat cyclique non transportable") end
+    local json_array = is_json_array(value)
     seen[value] = true
     local out = {}
     for key, child in pairs(value) do out[key] = export_value(child, seen) end
     seen[value] = nil
+    if json_array then
+        return { [TRANSPORT_JSON_ARRAY_KEY] = true, value = out }
+    end
     return out
 end
 
@@ -195,7 +222,7 @@ while not worker.cancelled() do
     if not received then
         if command == "timeout" then
             -- Vérification périodique de l'annulation.
-        elseif command == "closed" then
+        elseif command == "closed" or command == "cancelled" then
             break
         else
             driver:quit()
@@ -284,6 +311,15 @@ local function import_parent_value(session, value, seen)
     if type(value) ~= "table" then return value end
     if value[TRANSPORT_NIL_KEY] == true then return nil end
     if value[TRANSPORT_JSON_NULL_KEY] == true then return babet.json.null end
+    if value[TRANSPORT_JSON_ARRAY_KEY] == true then
+        if type(value.value) ~= "table" then error("webdriver_worker: marqueur tableau JSON invalide", 3) end
+        seen = seen or {}
+        if seen[value] then return seen[value] end
+        local out = {}
+        seen[value] = out
+        for key, child in pairs(value.value) do out[key] = import_parent_value(session, child, seen) end
+        return babet.json.as_array(out)
+    end
     if value.__babet_webdriver_element then
         return setmetatable({
             session = session,
@@ -318,11 +354,20 @@ local function export_parent_value(value, seen)
     if seen[value] then
         error("webdriver_worker: table cyclique non transportable", 3)
     end
+    local json_array = is_json_array(value)
     seen[value] = true
     local out = {}
     for key, child in pairs(value) do out[key] = export_parent_value(child, seen) end
     seen[value] = nil
+    if json_array then
+        return { [TRANSPORT_JSON_ARRAY_KEY] = true, value = out }
+    end
     return out
+end
+
+local function remaining_until(deadline)
+    local remaining = deadline - babet.monotonic()
+    return remaining > 0 and remaining or 0
 end
 
 local function receive_matching_response(session, expected_id, timeout)
@@ -367,7 +412,7 @@ function Session:_receive(expected_id, timeout)
     return table.unpack(values, 1, values.n)
 end
 
-function Session:_call(target, reference_id, method, ...)
+function Session:_call_with_timeout(response_timeout, target, reference_id, method, ...)
     if self.closed then return nil, "webdriver_worker: session fermée" end
     self.next_id = self.next_id + 1
     local id = self.next_id
@@ -387,11 +432,39 @@ function Session:_call(target, reference_id, method, ...)
         args = args,
     }, self.command_timeout)
     if not sent then return nil, "webdriver_worker: envoi: " .. tostring(send_err) end
-    return self:_receive(id, self.command_timeout)
+    return self:_receive(id, response_timeout)
+end
+
+function Session:_call(target, reference_id, method, ...)
+    return self:_call_with_timeout(self.response_timeout, target, reference_id, method, ...)
 end
 
 function Session:metadata()
     return self.metadata_value
+end
+
+function Session:websocket_url()
+    local capabilities = type(self.metadata_value) == "table" and self.metadata_value.capabilities or nil
+    local value = type(capabilities) == "table" and capabilities.webSocketUrl or nil
+    if type(value) == "string" and value ~= "" then return value end
+    return nil
+end
+
+function Session:bidi(options)
+    if self.closed then return nil, "webdriver_worker: session fermée" end
+    if self._bidi then
+        if not self._bidi:is_closed() then return self._bidi end
+        self._bidi = nil
+    end
+    local url = self:websocket_url()
+    if not url then
+        return nil, "webdriver_worker: BiDi non négocié : démarrez la session avec { bidi = true }"
+    end
+    local module = require("webdriver_bidi_worker")
+    local bidi, err = module.start(url, options)
+    if not bidi then return nil, err end
+    self._bidi = bidi
+    return bidi
 end
 
 function Session:status()
@@ -400,6 +473,10 @@ end
 
 function Session:cancel()
     if self.closed then return true end
+    if self._bidi then
+        self._bidi:cancel()
+        self._bidi = nil
+    end
     self.commands:close()
     local ok, err = self.job:cancel()
     self.results:close()
@@ -411,9 +488,30 @@ end
 function Session:stop(timeout)
     if self.closed then return true end
     timeout = positive_number("webdriver_worker.stop: timeout", timeout, self.stop_timeout)
+    local deadline = babet.monotonic() + timeout
+    local bidi_error
+    if self._bidi then
+        local remaining = remaining_until(deadline)
+        if remaining > 0 then
+            local ok, err = self._bidi:close(math.min(remaining, self.stop_timeout))
+            if not ok then bidi_error = err end
+        else
+            self._bidi:cancel()
+            bidi_error = "webdriver_worker: timeout pendant l'arrêt BiDi"
+        end
+        self._bidi = nil
+    end
     self.next_id = self.next_id + 1
     local id = self.next_id
-    local sent, send_err = self.commands:send({ kind = "stop", id = id }, timeout)
+    local remaining = remaining_until(deadline)
+    if remaining <= 0 then
+        self.job:cancel()
+        self.commands:close()
+        self.results:close()
+        self.closed = true
+        return nil, "webdriver_worker: timeout pendant l'arrêt"
+    end
+    local sent, send_err = self.commands:send({ kind = "stop", id = id }, remaining)
     if not sent then
         self.job:cancel()
         self.commands:close()
@@ -421,7 +519,15 @@ function Session:stop(timeout)
         self.closed = true
         return nil, "webdriver_worker: arrêt: " .. tostring(send_err)
     end
-    local response, receive_err = receive_matching_response(self, id, timeout)
+    remaining = remaining_until(deadline)
+    if remaining <= 0 then
+        self.job:cancel()
+        self.commands:close()
+        self.results:close()
+        self.closed = true
+        return nil, "webdriver_worker: timeout pendant l'arrêt"
+    end
+    local response, receive_err = receive_matching_response(self, id, remaining)
     if not response then
         self.job:cancel()
         self.commands:close()
@@ -430,7 +536,14 @@ function Session:stop(timeout)
         return nil, "webdriver_worker: arrêt sans confirmation: " .. tostring(receive_err)
     end
     self.commands:close()
-    local joined, join_value = self.job:join(timeout)
+    remaining = remaining_until(deadline)
+    if remaining <= 0 then
+        self.job:cancel()
+        self.results:close()
+        self.closed = true
+        return nil, "webdriver_worker: timeout pendant la terminaison"
+    end
+    local joined, join_value = self.job:join(remaining)
     self.results:close()
     self.closed = true
     if joined == nil then
@@ -443,6 +556,7 @@ function Session:stop(timeout)
     if not response.ok then
         return nil, "webdriver_worker: " .. tostring(response.error)
     end
+    if bidi_error then return nil, bidi_error end
     return true
 end
 
@@ -451,8 +565,8 @@ Session.__close = function(self) self:stop() end
 
 local DRIVER_METHODS = {
     "open", "url", "title", "source", "back", "forward", "refresh",
-    "find", "find_all", "active_element", "css", "xpath", "id", "name", "tag", "exists", "wait",
-    "js", "js_async", "screenshot", "print", "window", "windows", "switch", "switch_last",
+    "find", "find_all", "active_element", "css", "xpath", "id", "name", "tag", "exists",
+    "js", "js_async", "screenshot", "print", "window", "windows", "switch",
     "new_tab", "new_window", "close_window", "set_window_rect", "window_rect",
     "maximize", "minimize", "fullscreen", "frame", "top_frame",
     "parent_frame", "alert_text", "accept_alert", "dismiss_alert", "alert_send",
@@ -464,6 +578,29 @@ for _, method in ipairs(DRIVER_METHODS) do
     Session[method] = function(self, ...)
         return self:_call("driver", nil, method, ...)
     end
+end
+
+
+function Session:switch_last()
+    -- switch_last() enchaîne windows() puis switch() dans le worker, donc deux
+    -- requêtes HTTP successives peuvent chacune consommer request_timeout.
+    local timeout = math.max(self.response_timeout, 2 * self.request_timeout + 1)
+    return self:_call_with_timeout(timeout, "driver", nil, "switch_last")
+end
+
+function Session:wait(selector, options)
+    local timeout = self.response_timeout
+    if type(options) == "table" and type(options.timeout) == "number"
+        and options.timeout == options.timeout and options.timeout > 0
+        and options.timeout ~= math.huge then
+        local interval = type(options.interval) == "number" and options.interval > 0
+            and options.interval or 0.2
+        -- wait() est une boucle locale au worker : son budget total peut
+        -- dépasser request_timeout. Le parent doit donc couvrir le timeout
+        -- logique, une dernière requête HTTP et l'intervalle final.
+        timeout = math.max(timeout, options.timeout + self.request_timeout + interval + 1)
+    end
+    return self:_call_with_timeout(timeout, "driver", nil, "wait", selector, options)
 end
 
 function ElementProxy:element_id()
@@ -513,6 +650,14 @@ function M.start(options)
         worker_options.command_timeout,
         120
     )
+    local request_timeout = positive_number(
+        "webdriver_worker.start: request_timeout",
+        driver_options.request_timeout,
+        120
+    )
+    -- Le parent ne doit jamais expirer avant la requête HTTP exécutée par le
+    -- worker. Une seconde couvre uniquement le transport du résultat.
+    local response_timeout = math.max(command_timeout, request_timeout) + 1
     local worker_start_timeout = positive_number(
         "webdriver_worker.start: worker_start_timeout",
         worker_options.worker_start_timeout,
@@ -538,6 +683,9 @@ function M.start(options)
     local job, spawn_err = babet.workers.spawn(WORKER_CODE, {
         root = MODULE_DIR,
         options = driver_options,
+        nil_key = TRANSPORT_NIL_KEY,
+        json_null_key = TRANSPORT_JSON_NULL_KEY,
+        json_array_key = TRANSPORT_JSON_ARRAY_KEY,
     }, {
         channels = {
             commands = commands,
@@ -567,6 +715,8 @@ function M.start(options)
         results = results,
         metadata_value = ready.metadata or {},
         command_timeout = command_timeout,
+        request_timeout = request_timeout,
+        response_timeout = response_timeout,
         stop_timeout = stop_timeout,
         next_id = 0,
         closed = false,

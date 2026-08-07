@@ -1,6 +1,8 @@
 # webdriver — browser automation with Babet
 
-`webdriver.lua` is a **W3C WebDriver** client for Babet 2.9.0 or newer. It
+`webdriver.lua` is a **W3C WebDriver Classic** client for Babet 2.9.0 or
+newer. Since version 2.0.0, `webdriver_bidi.lua` adds **WebDriver BiDi** on top
+of the native WebSocket client provided by Babet 2.22.0 or newer. The library
 drives Firefox, Chrome and Chromium through geckodriver or chromedriver. Babet
 is available from its
 [official GitHub repository](https://github.com/Chipsterjulien/babet).
@@ -21,6 +23,7 @@ is available from its
 - [Alerts, cookies and timeouts](#alerts-cookies-and-timeouts)
 - [Screenshots](#screenshots)
 - [Automatic driver management](#automatic-driver-management)
+- [WebDriver BiDi](#webdriver-bidi)
 - [Workers and channels](#workers-and-channels)
 - [Error contract](#error-contract)
 - [Limitations](#limitations)
@@ -28,7 +31,8 @@ is available from its
 ## Installation
 
 The files `webdriver.lua`, `webdriver_version.lua`, `driver_manager.lua` and,
-when needed, `webdriver_worker.lua` must be reachable through `package.path`.
+depending on the selected mode, `webdriver_worker.lua`, `webdriver_bidi.lua`
+and `webdriver_bidi_worker.lua` must be reachable through `package.path`.
 
 ```lua
 local webdriver = require("webdriver")
@@ -36,7 +40,8 @@ local webdriver = require("webdriver")
 
 The library requires:
 
-- [Babet 2.9.0 or newer](https://github.com/Chipsterjulien/babet);
+- [Babet 2.9.0 or newer](https://github.com/Chipsterjulien/babet) for WebDriver Classic;
+- Babet 2.22.0 or newer for WebDriver BiDi and the complete 2.0 test suite;
 - Linux;
 - Firefox, Chrome or Chromium;
 - geckodriver or chromedriver, either installed or downloadable.
@@ -87,6 +92,10 @@ The main script then loads:
 local webdriver_worker = require("webdriver_worker")
 ```
 
+For direct BiDi, add `webdriver_bidi.lua`. For a dedicated BiDi worker, also
+add `webdriver_bidi_worker.lua`. A Classic session hosted by
+`webdriver_worker.lua` uses the same module when `session:bidi()` is called.
+
 `tools/check_env.lua` is an optional diagnostic tool. The `tests/`, `examples/`
 and `docs/` directories, as well as `build_docs.sh` and the `run_*.sh` scripts,
 are not required in an application project.
@@ -96,7 +105,8 @@ are not required in an application project.
 The repository's `bin/` directory is only a convenient convention. Babet may
 be installed anywhere. It can be downloaded or built from its
 [GitHub repository](https://github.com/Chipsterjulien/babet), and babet-webdriver
-requires version **2.9.0** or newer.
+requires **2.9.0** or newer for the Classic client. WebDriver BiDi requires
+**Babet 2.22.0** or newer.
 
 Project-local executable:
 
@@ -157,8 +167,8 @@ To run the complete validation campaign with a single command:
 
 The script enables headless mode by default, keeps the full progress visible in
 the terminal and copies the exact same output to `babet-webdriver-tests.txt`.
-The log is first written to a unique temporary file in the destination directory and is atomically published only when the campaign finishes. An existing complete log is therefore never truncated while tests are running. `flock` (util-linux) locks the log: a second campaign targeting the same file is rejected until the first one exits. A completed campaign, whether successful or failed, replaces the previous log so it can be shared as-is.
-The log is overwritten on each run so it can be shared as-is. Use `HEADLESS=0`
+The log is first written to a unique temporary file in the destination directory and is atomically published only when the campaign finishes. An existing complete log is therefore never truncated while tests are running, and accidentally parallel campaigns never mix their contents. If several campaigns target the same path, the one that finishes last simply becomes the current log. A completed campaign, whether successful or failed, replaces the previous log so it can be shared as-is.
+Use `HEADLESS=0`
 to display the browsers, or `TEST_LOG=/path/test.txt` to select another file.
 
 ### Complete minimal example
@@ -257,6 +267,7 @@ local driver = assert(webdriver.start({
 | `user_data_dir` | string | absent | explicit Chrome/Chromium profile |
 | `window_size` | `{w,h}` | absent | initial window size |
 | `accept_insecure_certs` | boolean | `false` | corresponding W3C capability |
+| `bidi` | boolean | `false` | requests `webSocketUrl` and negotiates BiDi; Babet 2.22+ |
 
 ```lua
 local driver = assert(webdriver.firefox({
@@ -322,7 +333,7 @@ never removed automatically.
 |---|---|---|---|
 | `port` | integer | automatic | WebDriver server port |
 | `port_attempts` | integer | `5` | retries for automatic port selection |
-| `attach` | boolean | `false` | does not start a process |
+| `attach` | boolean | `false` | uses an external driver ready to create a new session |
 | `start_timeout` | seconds | `15` | startup time budget |
 | `status_timeout` | seconds | `1` | timeout for each `/status` probe |
 | `poll_interval` | seconds | `0.1` | delay between probes |
@@ -331,6 +342,12 @@ Without an explicit port, the library asks the kernel for a free port. The
 temporary socket must then be closed before the driver starts, so a small race
 window remains. `port_attempts` lets the library retry when another process
 takes the port in that interval.
+
+In `attach` mode, the external driver must answer `/status` with `ready=true`, so it
+must be available to create **a new session**. This mode does not resume an existing
+Selenium session. In particular, geckodriver normally reports `ready=false` while
+already occupied; babet-webdriver then reports it as reachable but unavailable
+instead of misdiagnosing a network failure.
 
 In `attach` mode, the historical defaults are preserved:
 
@@ -538,7 +555,8 @@ print(assert(element:computed_label()))
 ```
 
 `attr()` mirrors Selenium's practical behavior: it tries the HTML attribute and
-then the DOM property.
+then the DOM property. If neither exists, it returns `nil` without an error.
+Generic JavaScript results still preserve `babet.json.null`.
 
 ### Boolean states
 
@@ -637,6 +655,11 @@ webdriver.keys.ENTER
 webdriver.keys.CONTROL
 webdriver.keys.DELETE
 webdriver.keys.F1
+webdriver.keys.SEPARATOR
+webdriver.keys.RIGHT_SHIFT
+webdriver.keys.RIGHT_CONTROL
+webdriver.keys.RIGHT_ALT
+webdriver.keys.RIGHT_META
 ```
 
 ## Windows, tabs and frames
@@ -761,16 +784,19 @@ local path = assert(manager.install("firefox", {
 
 - geckodriver: latest official GitHub release, unless
   `driver_manager.gecko_version` is forced;
-- chromedriver: version matching the installed Chrome/Chromium milestone,
-  unless `driver_manager.chrome_version` is forced.
+- chromedriver: version matching the milestone of the Chrome or Chromium binary
+  actually selected, unless `driver_manager.chrome_version` is forced.
 
 ### Verification
 
-The cache stores one record per artifact:
+The cache uses `XDG_CACHE_HOME/babet-webdriver` when available, otherwise:
 
 ```text
 ~/.cache/babet-webdriver/pins/<driver>_<platform>_<version>.json
 ```
+
+Without `HOME`, a private per-user/UID cache is selected under `/tmp` to avoid
+permission collisions between accounts.
 
 Each record contains:
 
@@ -793,15 +819,177 @@ This mode detects later modification. It does not prove that the first artifact
 was legitimate. For a stronger trust chain, supply `expected_sha256` from an
 independent channel.
 
+For release preflight, `RUN_INSTALL_SMOKE=1 ./run_all_tests.sh` creates a fresh
+temporary cache and exercises the real download, extraction, chmod, hashing, atomic
+publication, and pin reread paths for geckodriver and chromedriver without touching
+the user cache.
+
+In CI, `BABET_WEBDRIVER_GITHUB_TOKEN`, `GH_TOKEN` or `GITHUB_TOKEN` may be set
+to authenticate the GitHub API request used for geckodriver. If a repository-
+scoped GitHub Actions `GITHUB_TOKEN` is rejected by the public geckodriver
+repository, the request is retried anonymously. The token is never sent to other
+hosts.
+
 ### Extraction
 
 The archive is never loaded entirely into Lua. Babet downloads it to a
-temporary file, verifies the hash, and then extracts only:
+temporary file, verifies the hash, then extracts into a unique temporary file
+before atomically publishing the executable in the cache:
 
 - `geckodriver` for Firefox;
 - `chromedriver-<platform>/chromedriver` for Chrome.
 
 Anti-bomb limits apply to the complete archive.
+
+## WebDriver BiDi
+
+Version 2.0.0 adds WebDriver BiDi without replacing WebDriver Classic. The HTTP
+session is created normally with the W3C `webSocketUrl = true` capability, then
+the client connects to the URL returned by the driver. Classic and BiDi
+commands therefore control **the same browser and the same session**.
+
+### Negotiation and direct client
+
+```lua
+local webdriver = require("webdriver")
+
+local driver = assert(webdriver.firefox({
+    headless = true,
+    bidi = true,
+}))
+
+print(assert(driver:websocket_url()))
+local bidi = assert(driver:bidi())
+print(assert(bidi:status()).ready)
+```
+
+`bidi = true` requires Babet 2.22.0 or newer and `babet.websocket`. If the
+driver accepts session creation but does not return a usable `webSocketUrl`,
+babet-webdriver fails creation and cleans up the session, driver process and
+temporary profile.
+
+Connection options accepted by `driver:bidi(options)`:
+
+| Option | Default | Description |
+|---|---:|---|
+| `timeout` | 5 s | WebSocket connection timeout |
+| `command_timeout` | 30 s | BiDi command budget |
+| `close_timeout` | 5 s | close-handshake budget |
+| `event_queue_limit` | 1024 | maximum queued events |
+| `verify` | Babet | TLS verification for `wss://` |
+| `ca_cert`, `ca_path`, `hostname`, `min_version` | Babet | TLS parameters passed to the transport |
+| `max_message_bytes`, `max_frame_bytes` | Babet | transport size limits |
+
+### Typed commands
+
+The 2.0.0 core surface includes:
+
+```lua
+local status = assert(bidi:status())
+local tree = assert(bidi:get_tree({ max_depth = 0 }))
+local context = tree.contexts[1].context
+
+local navigation = assert(bidi:navigate(
+    context,
+    "https://example.com",
+    { wait = "complete" }
+))
+
+local evaluation = assert(bidi:evaluate("document.title", context))
+local realms = assert(bidi:get_realms({ context = context }))
+```
+
+`evaluate()` accepts either a browsing-context id or a `target` table. Supported
+options are `await_promise`, `result_ownership`, `serialization_options` and
+`user_activation`.
+
+The BiDi standard evolves independently from babet-webdriver releases. For a
+command that does not yet have a convenience wrapper, `call()` provides the
+low-level escape hatch:
+
+```lua
+local result = assert(bidi:call("browser.getUserContexts", {}))
+```
+
+### Subscriptions and events
+
+```lua
+local subscription = assert(bidi:subscribe({
+    "log.entryAdded",
+    "network.beforeRequestSent",
+}, {
+    contexts = { context },
+}))
+
+local event, err, code = bidi:next_event(5)
+if event then
+    print(event.method)
+elseif code ~= "timeout" then
+    error(err)
+end
+
+assert(bidi:unsubscribe(subscription))
+```
+
+Events that arrive while a command response is pending are retained and never
+desynchronize command ids. The queue is bounded by `event_queue_limit`. When it
+overflows, excess events are counted and the synthetic
+`babetWebDriver.eventOverflow` event reports the loss.
+
+An explicit callback interface is also available:
+
+```lua
+bidi:on("log.entryAdded", function(event)
+    print(event.params.text)
+end)
+
+assert(bidi:dispatch(5, 10))
+```
+
+`dispatch()` runs callbacks in the calling Lua thread. No implicit concurrent
+callback can therefore interrupt an arbitrary user command.
+
+### Dedicated BiDi worker
+
+`driver:bidi_worker()` moves the WebSocket connection into a separate worker:
+
+```lua
+local driver = assert(webdriver.chromium({ headless = true, bidi = true }))
+local bidi = assert(driver:bidi_worker({ event_queue_limit = 1024 }))
+local subscription = assert(bidi:subscribe("log.entryAdded"))
+
+local context = assert(bidi:get_tree({ max_depth = 0 })).contexts[1].context
+assert(bidi:evaluate("console.log('hello bidi')", context))
+local event = assert(bidi:next_event(5))
+print(event.method)
+
+assert(bidi:unsubscribe(subscription))
+assert(driver:quit())
+```
+
+For a Classic session already hosted by `webdriver_worker.lua`, the parent only
+needs to call `session:bidi()`. The BiDi worker is separate from the Classic
+worker and owns its own WebSocket.
+
+Because `babet.websocket` is synchronous, this worker is command-driven: it
+waits on its parent channel and reads the WebSocket only while processing a BiDi
+command or `next_event()`. A long `next_event(timeout)` is read in bounded slices
+so worker cancellation remains responsive. It never polls the network while
+idle, preventing a WebSocket `recv()` from starving the next command. Events
+interleaved with a command are retained in the bounded BiDi client queue
+(`event_queue_limit`).
+
+Worker-specific options are `channel_capacity`, `command_timeout`,
+`worker_start_timeout` and `stop_timeout`. BiDi client options, including
+`event_queue_limit`, are also accepted and forwarded to the transport.
+
+`driver:quit()` and `session:stop()` automatically close an attached BiDi
+transport before ending the Classic session. BiDi objects also support Lua
+5.4/5.5 to-be-closed variables through `__close`.
+
+For `webdriver_worker`, `stop_timeout` (or the explicit `timeout` passed to
+`session:stop(timeout)`) is a global budget: it covers closing any attached BiDi
+worker first, then stopping and joining the Classic worker.
 
 ## Workers and channels
 
@@ -823,8 +1011,13 @@ print(assert(heading:text()))
 assert(session:stop())
 ```
 
+The parent response budget covers at least `request_timeout` plus a small
+transport margin. For `wait()`, it also covers the requested logical timeout and
+one final HTTP request, so the proxy cannot expire before its worker.
+
 Before creating the worker, the parent prepares the driver when necessary.
-Multiple workers therefore do not download the same artifact concurrently.
+Concurrent installations remain safe: every extraction uses its own temporary
+file and the final executable is published atomically.
 
 ### Element and Shadow DOM proxies
 
@@ -901,10 +1094,10 @@ Programming errors that raise a Lua exception include:
 
 ## Limitations
 
-- synchronous protocol;
+- the direct BiDi client is synchronous; use `bidi_worker()` to isolate the WebSocket loop;
+- the typed 2.0.0 BiDi surface covers the session/browsingContext/script core; `call()` exposes the rest of the protocol;
 - automatic driver management currently supports Linux only;
 - Chrome for Testing provides a Linux x86-64 binary only;
-- no WebDriver BiDi;
 - no authenticated or TLS remote proxy for the WebDriver server;
 - no download resume;
 - no progress callback;

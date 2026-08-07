@@ -5,28 +5,11 @@ set -o pipefail
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 LOG=${TEST_LOG:-"$ROOT/babet-webdriver-tests.txt"}
 HEADLESS=${HEADLESS:-1}
-export HEADLESS
+RUN_INSTALL_SMOKE=${RUN_INSTALL_SMOKE:-0}
+export HEADLESS RUN_INSTALL_SMOKE
 
 LOG_DIR=$(dirname -- "$LOG")
 mkdir -p "$LOG_DIR"
-
-# Deux campagnes simultanées ne doivent pas se mélanger ni publier un journal
-# dans un ordre ambigu. Babet WebDriver cible Linux ; flock (util-linux) fournit
-# ici un verrou de processus robuste qui est libéré automatiquement à la fin.
-if ! command -v flock >/dev/null 2>&1; then
-    printf "[FAIL] commande 'flock' requise pour verrouiller le journal de tests.\n" >&2
-    exit 127
-fi
-
-LOCK_FILE="${LOG_DIR}/.$(basename -- "$LOG").lock"
-exec 9>>"$LOCK_FILE" || {
-    printf '[FAIL] impossible d’ouvrir le verrou : %s\n' "$LOCK_FILE" >&2
-    exit 1
-}
-if ! flock -n 9; then
-    printf '[FAIL] une campagne de tests écrit déjà vers : %s\n' "$LOG" >&2
-    exit 75
-fi
 
 # La campagne construit son journal dans un fichier temporaire unique situé
 # dans le même répertoire que la destination. Le mv final est donc un rename
@@ -58,10 +41,11 @@ run_suite() {
     printf '============================================================\n'
     printf 'Date      : %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')"
     printf 'HEADLESS  : %s\n' "$HEADLESS"
+    printf 'Install   : %s\n' "$RUN_INSTALL_SMOKE"
     printf 'Journal   : %s\n' "$LOG"
     printf '\n'
 
-    printf '=== Tests environnement + protocole + worker ===\n'
+    printf '=== Tests environnement + protocole + BiDi + worker ===\n'
     "$ROOT/run_tests.sh" || return $?
 
     printf '\n=== Smoke direct — Firefox ===\n'
@@ -75,6 +59,14 @@ run_suite() {
 
     printf '\n=== Smoke worker — Chromium ===\n'
     "$ROOT/run_worker_smoke.sh" chromium || return $?
+
+    if [ "${RUN_INSTALL_SMOKE:-0}" = "1" ]; then
+        printf '\n=== Préflight installation fraîche — Firefox ===\n'
+        "$ROOT/run_install_smoke.sh" firefox || return $?
+
+        printf '\n=== Préflight installation fraîche — Chromium ===\n'
+        "$ROOT/run_install_smoke.sh" chromium || return $?
+    fi
 }
 
 # tee garde le déroulé visible dans le terminal, mais écrit uniquement dans le

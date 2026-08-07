@@ -8,6 +8,10 @@ le binaire sous le nom :
 bin/babet
 ```
 
+WebDriver Classic nécessite Babet 2.9.0 ou supérieur. WebDriver BiDi et la
+campagne de tests complète de babet-webdriver 2.0.0 nécessitent **Babet 2.22.0
+ou supérieur**.
+
 Cette organisation permet de conserver une version de Babet propre au projet,
 mais elle n'est pas obligatoire. Les scripts du dépôt cherchent le binaire dans
 cet ordre :
