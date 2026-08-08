@@ -50,6 +50,55 @@ Elle n'a pas besoin de `tar`, `unzip`, `curl`, `base64` ou d'un shell externe.
 
 ## Démarrer un nouveau projet
 
+### Quoi télécharger
+
+Un nouveau projet a besoin de deux éléments indépendants :
+
+1. **babet-webdriver** : télécharge l'archive source de la version voulue depuis
+   [les releases babet-webdriver](https://github.com/Chipsterjulien/babet-webdriver/releases).
+   Le runtime est constitué de modules Lua : il n'y a pas d'installation séparée.
+2. **Babet** : télécharge un binaire Linux depuis
+   [les releases Babet](https://github.com/Chipsterjulien/babet/releases), ou compile-le
+   depuis le [dépôt Babet](https://github.com/Chipsterjulien/babet). Utilise Babet
+   **2.22.0 ou supérieur** pour disposer de toutes les fonctions de babet-webdriver
+   2.0. Un projet utilisant uniquement WebDriver Classic peut fonctionner à partir
+   de **Babet 2.9.0**.
+   Sur un PC Linux Intel/AMD 64 bits classique, choisis l'artefact
+   `babet-<version>-linux-x86_64` ; les builds ARM sont publiés séparément.
+
+Si tu ne veux pas choisir les modules un par un, le plus simple et le plus sûr est
+de copier tous les fichiers runtime :
+
+```text
+mon-projet/
+├── bin/
+│   └── babet
+├── webdriver.lua
+├── webdriver_version.lua
+├── driver_manager.lua
+├── webdriver_worker.lua
+├── webdriver_bidi.lua
+├── webdriver_bidi_worker.lua
+└── main.lua
+```
+
+```sh
+chmod +x bin/babet
+./bin/babet main.lua
+```
+
+L'emplacement `bin/babet` est facultatif : Babet peut aussi être installé dans le
+`PATH` ou appelé avec un chemin absolu quelconque. De même, les modules Lua peuvent
+être rangés dans un autre dossier à condition d'ajouter celui-ci à `package.path`.
+Les éléments de développement (`tests/`, `examples/`, `docs/`, `tools/`,
+`run_*.sh`, `build_docs.sh`) ne sont pas nécessaires dans un projet utilisateur.
+
+`geckodriver` et `chromedriver` ne font partie d'aucune des deux archives source.
+Ils peuvent être présents dans le `PATH`, indiqués avec `driver_path`, ou installés
+par `driver_manager.lua`. Un premier téléchargement encore inconnu est refusé sauf
+s'il est explicitement autorisé avec `trust_on_first_use = true`, ou contrôlé avec
+`expected_sha256`.
+
 ### Projet direct : fichiers indispensables
 
 Pour piloter un navigateur depuis le script principal, copie uniquement :

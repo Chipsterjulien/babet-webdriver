@@ -50,6 +50,53 @@ It does not require `tar`, `unzip`, `curl`, `base64` or an external shell.
 
 ## Starting a new project
 
+### What to download
+
+A new application needs two independent pieces:
+
+1. **babet-webdriver**: download the source archive for the desired version from
+   [babet-webdriver Releases](https://github.com/Chipsterjulien/babet-webdriver/releases).
+   The runtime is made of Lua modules; there is no separate installation step.
+2. **Babet**: download a Linux build from
+   [Babet Releases](https://github.com/Chipsterjulien/babet/releases), or build it
+   from the [Babet repository](https://github.com/Chipsterjulien/babet). Use Babet
+   **2.22.0 or newer** to enable the complete 2.0 feature set. A Classic-only project
+   needs at least **2.9.0**.
+   On a typical 64-bit Intel/AMD Linux machine, choose the
+   `babet-<version>-linux-x86_64` release asset; ARM builds are published separately.
+
+If you do not want to choose modules feature by feature, copying all runtime files
+is the simplest and safest layout:
+
+```text
+my-project/
+├── bin/
+│   └── babet
+├── webdriver.lua
+├── webdriver_version.lua
+├── driver_manager.lua
+├── webdriver_worker.lua
+├── webdriver_bidi.lua
+├── webdriver_bidi_worker.lua
+└── main.lua
+```
+
+```sh
+chmod +x bin/babet
+./bin/babet main.lua
+```
+
+The `bin/babet` location is optional: Babet may instead be installed in `PATH` or
+invoked through an arbitrary absolute path. Likewise, the Lua modules may be moved
+to another directory if that directory is added to `package.path`. Development
+content (`tests/`, `examples/`, `docs/`, `tools/`, `run_*.sh`, `build_docs.sh`) is
+not required in an application project.
+
+`geckodriver` and `chromedriver` are not part of either source archive. They may be
+provided in `PATH`, selected through `driver_path`, or installed by
+`driver_manager.lua`. An unknown first download is rejected unless it is explicitly
+authorized with `trust_on_first_use = true`, or checked with `expected_sha256`.
+
 ### Direct project: required files
 
 To drive a browser from the main script, copy only:
