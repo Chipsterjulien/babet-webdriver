@@ -1,10 +1,13 @@
-# webdriver — browser automation with Babet
+# webdriver — WebDriver automation in Lua with Babet
 
-`webdriver.lua` is a **W3C WebDriver Classic** client for Babet 2.9.0 or
-newer. Since version 2.0.0, `webdriver_bidi.lua` adds **WebDriver BiDi** on top
-of the native WebSocket client provided by Babet 2.22.0 or newer. The library
-drives Firefox, Chrome and Chromium through geckodriver or chromedriver. Babet
-is available from its
+`babet-webdriver` is a **Lua library** for browser automation with W3C WebDriver.
+Your automation scripts are regular **Lua** code executed by Babet.
+`webdriver.lua` provides **WebDriver Classic** for Babet 2.9.0 or newer; since
+version 2.0.0, `webdriver_bidi.lua` adds **WebDriver BiDi** using the native
+WebSocket client provided by Babet 2.22.0 or newer. The library drives Firefox,
+Chrome and Chromium through geckodriver or chromedriver. Babet is the runtime
+that executes the Lua scripts and provides the native HTTP, WebSocket, process
+and worker APIs used by babet-webdriver. It is available from its
 [official GitHub repository](https://github.com/Chipsterjulien/babet).
 
 ## Table of contents

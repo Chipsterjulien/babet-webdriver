@@ -1,10 +1,14 @@
 # babet-webdriver
 
+**WebDriver browser automation in Lua, powered by Babet.**
+
 Official repository: https://github.com/Chipsterjulien/babet-webdriver
 
-A **W3C WebDriver Classic and WebDriver BiDi** client in Lua for Babet. The
-Classic API works with **Babet 2.9.0 or newer**; the BiDi transport requires
-**Babet 2.22.0 or newer** and its native WebSocket client. The library drives
+`babet-webdriver` is a **Lua library** for W3C WebDriver Classic and WebDriver
+BiDi. You write browser automation directly in **Lua**, and Babet executes the
+scripts while providing the native HTTP, WebSocket, process, worker and utility
+APIs used by the library. The Classic API works with **Babet 2.9.0 or newer**;
+the BiDi transport requires **Babet 2.22.0 or newer**. The library drives
 Firefox, Chrome and Chromium with a Selenium-like API, without external Lua
 modules and without spawning a shell to manage drivers. Babet is available from
 its [official GitHub repository](https://github.com/Chipsterjulien/babet).
